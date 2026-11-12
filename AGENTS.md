@@ -1,0 +1,21 @@
+# Shield Project Guidance
+
+- Use **Shield** as the project name. DaemonONE is the target environment.
+- Keep project descriptions factual and consistent with implemented features.
+- Write documentation in clear, direct language suitable for a student
+  engineering project.
+- Use stable Rust and idiomatic, readable modules.
+- Keep application logic in the library and `main.rs` small.
+- Work only on the explicitly requested project phase.
+- Use safe Rust; do not introduce `unsafe` without explicit approval.
+- Validate security-sensitive inputs and fail closed as security features are
+  introduced.
+- Never hardcode or expose secrets, and never store private keys as plaintext.
+- Do not execute arbitrary shell commands or expose an unrestricted shell.
+- Use parameterized SQL for database work.
+- Add tests for security behavior as each security module is implemented.
+- Do not commit, push, merge, or reset without explicit approval.
+
+Phase 0 is only a project foundation. Do not describe the current application
+as providing authentication, authorization, replay prevention, or audit
+logging.

@@ -1,0 +1,60 @@
+[1mdiff --git a/README.md b/README.md[m
+[1mindex 8646eac..8af56b9 100644[m
+[1m--- a/README.md[m
+[1m+++ b/README.md[m
+[36m@@ -1,2 +1,54 @@[m
+ # Shield[m
+[31m-Secure Peer Authentication and Task Authorization Framework[m
+[32m+[m
+[32m+[m[32mShield is a standalone cybersecurity framework being developed in Rust for[m
+[32m+[m[32mthe DaemonONE distributed operating environment.[m
+[32m+[m
+[32m+[m[32m## Current status: Phase 0[m
+[32m+[m
+[32m+[m[32mThe current application is a project foundation. It prints a welcome message[m
+[32m+[m[32mand supports `--help` and `--version`. It does not yet authenticate devices,[m
+[32m+[m[32mauthorize tasks, prevent replay attacks, communicate over a network, or write[m
+[32m+[m[32msecurity audit logs. Do not use it to protect production systems.[m
+[32m+[m
+[32m+[m[32m## Planned objectives[m
+[32m+[m
+[32m+[m[32m- Manage device identities and trusted-device enrollment and revocation.[m
+[32m+[m[32m- Sign requests with Ed25519 and verify them against registered public keys.[m
+[32m+[m[32m- Authorize tasks using explicit allow-lists.[m
+[32m+[m[32m- Prevent replayed and expired requests.[m
+[32m+[m[32m- Record security decisions in SQLite without logging private key material.[m
+[32m+[m[32m- Provide an interactive terminal demonstration and integration-ready[m
+[32m+[m[32m  interfaces.[m
+[32m+[m
+[32m+[m[32mThe objectives above describe planned work. Only the Phase 0 features listed[m
+[32m+[m[32munder current status are implemented so far.[m
+[32m+[m
+[32m+[m[32m## Requirements[m
+[32m+[m
+[32m+[m[32m- Stable Rust toolchain with Cargo.[m
+[32m+[m
+[32m+[m[32m## Build and run[m
+[32m+[m
+[32m+[m[32m```sh[m
+[32m+[m[32mcargo run[m
+[32m+[m[32mcargo run -- --help[m
+[32m+[m[32mcargo run -- --version[m
+[32m+[m[32m```[m
+[32m+[m
+[32m+[m[32m## Project layout[m
+[32m+[m
+[32m+[m[32m- `src/lib.rs` and `src/`: library API, configuration, and error structure.[m
+[32m+[m[32m- `src/main.rs`: small command-line entry point.[m
+[32m+[m[32m- `tests/`: integration tests.[m
+[32m+[m[32m- `docs/architecture.md`: architecture and phase boundaries.[m
+[32m+[m[32m- `docs/threat-model.md`: current security scope and limitations.[m
+[32m+[m
+[32m+[m[32m## Dependency[m
+[32m+[m
+[32m+[m[32mClap provides command-line parsing and generated help/version options. The[m
+[32m+[m[32minitial error type uses Rust's standard library, so no error-handling[m
+[32m+[m[32mdependency is needed yet.[m
+[32m+[m
+[32m+[m[32m## License[m
+[32m+[m
+[32m+[m[32mMIT. See [LICENSE](LICENSE).[m
