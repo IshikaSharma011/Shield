@@ -1,5 +1,6 @@
 use clap::{Parser, Subcommand};
 use shield::{
+    authorization::AuthorizationEngine,
     device_identity::DeviceIdentity,
     device_registry::{parse_public_key_export, public_key_fingerprint, DeviceRegistry},
 };
@@ -17,6 +18,11 @@ enum Command {
     Registry {
         #[command(subcommand)]
         action: RegistryAction,
+    },
+    /// Show the predefined, non-executing task allow-list.
+    Authorization {
+        #[command(subcommand)]
+        action: AuthorizationAction,
     },
 }
 
@@ -57,6 +63,30 @@ enum RegistryAction {
         #[arg(long)]
         device_id: Uuid,
     },
+    /// Grant a predefined task to a trusted device.
+    GrantTask {
+        #[arg(long, value_name = "PATH")]
+        database: PathBuf,
+        #[arg(long)]
+        device_id: Uuid,
+        #[arg(long)]
+        task_id: String,
+    },
+    /// Remove a task grant from a device.
+    RevokeTask {
+        #[arg(long, value_name = "PATH")]
+        database: PathBuf,
+        #[arg(long)]
+        device_id: Uuid,
+        #[arg(long)]
+        task_id: String,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum AuthorizationAction {
+    /// List predefined tasks and their allowed parameter values.
+    Tasks,
 }
 
 #[derive(Debug, Parser)]
@@ -134,6 +164,49 @@ fn run() -> Result<(), Box<dyn Error>> {
                 let registry = DeviceRegistry::open(database)?;
                 let device = registry.revoke(device_id)?;
                 println!("Revoked device {} ({})", device.name, device.device_id);
+            }
+            RegistryAction::GrantTask {
+                database,
+                device_id,
+                task_id,
+            } => {
+                let registry = DeviceRegistry::open(database)?;
+                let changed = AuthorizationEngine.grant_task(&registry, device_id, &task_id)?;
+                println!(
+                    "{} permission for {task_id} on {device_id}",
+                    if changed { "Granted" } else { "Already had" }
+                );
+            }
+            RegistryAction::RevokeTask {
+                database,
+                device_id,
+                task_id,
+            } => {
+                let registry = DeviceRegistry::open(database)?;
+                let changed = AuthorizationEngine.revoke_task(&registry, device_id, &task_id)?;
+                println!(
+                    "{} permission for {task_id} on {device_id}",
+                    if changed { "Revoked" } else { "No existing" }
+                );
+            }
+        },
+        Some(Command::Authorization { action }) => match action {
+            AuthorizationAction::Tasks => {
+                for task in AuthorizationEngine.tasks() {
+                    println!("{} — {}", task.task_id, task.description);
+                    for parameter in task.parameters {
+                        println!(
+                            "  {}{}: {}",
+                            parameter.name,
+                            if parameter.required {
+                                " (required)"
+                            } else {
+                                ""
+                            },
+                            parameter.allowed_values.join(", ")
+                        );
+                    }
+                }
             }
         },
     }

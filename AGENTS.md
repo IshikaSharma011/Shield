@@ -17,7 +17,8 @@
 - Do not commit, push, merge, or reset without explicit approval.
 
 Phase 3 adds fingerprint-checked manual enrollment, SQLite-backed trusted
-device records, signature-based authentication, and revocation. Do not
-describe the project as providing task authorization, replay prevention,
-networking, or audit logging until those phases are implemented. Never treat
-device discovery or request-supplied key material as proof of trust.
+device records, signature-based authentication, and revocation. Phase 4 adds
+predefined task authorization with explicit per-device grants and parameter
+allow-lists; authorization returns a decision and does not execute tasks.
+Replay prevention, networking, and audit logging are not implemented yet.
+Never treat device discovery or request-supplied key material as proof of trust.

@@ -19,6 +19,11 @@ const REGISTRY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS trusted_devices (
     name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 128),
     registered_at INTEGER NOT NULL CHECK (registered_at >= 0),
     status TEXT NOT NULL CHECK (status IN ('trusted', 'revoked'))
+);
+CREATE TABLE IF NOT EXISTS device_task_permissions (
+    device_id TEXT NOT NULL REFERENCES trusted_devices(device_id) ON DELETE CASCADE,
+    task_id TEXT NOT NULL,
+    PRIMARY KEY (device_id, task_id)
 );";
 
 /// Current trust state for a manually enrolled device.
@@ -68,6 +73,31 @@ pub struct RegisteredDevice {
 /// A SQLite-backed collection of manually trusted devices.
 pub struct DeviceRegistry {
     connection: Connection,
+}
+
+/// A request that has passed registry lookup and signature verification.
+/// Its private fields prevent callers from manufacturing an authenticated
+/// request by constructing a `TaskRequest` directly.
+pub struct AuthenticatedRequest {
+    request: TaskRequest,
+}
+
+impl AuthenticatedRequest {
+    pub fn request(&self) -> &TaskRequest {
+        &self.request
+    }
+
+    pub fn device_id(&self) -> Uuid {
+        self.request.device_id
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum TaskPermissionStatus {
+    UnknownDevice,
+    Revoked,
+    NotGranted,
+    Granted,
 }
 
 impl DeviceRegistry {
@@ -194,6 +224,17 @@ impl DeviceRegistry {
         &self,
         signed_request: &SignedRequest,
     ) -> Result<TaskRequest, RegistryError> {
+        self.authenticate_request(signed_request)
+            .map(|authenticated| authenticated.request)
+    }
+
+    /// Authenticates a request and returns a proof-bearing value suitable for
+    /// authorization. Unlike a raw `TaskRequest`, this value can only be
+    /// created after registry and signature checks succeed.
+    pub fn authenticate_request(
+        &self,
+        signed_request: &SignedRequest,
+    ) -> Result<AuthenticatedRequest, RegistryError> {
         let untrusted_request = TaskRequest::deserialize(signed_request.request_bytes())
             .map_err(RegistryError::RequestVerification)?;
         let device = self
@@ -205,12 +246,84 @@ impl DeviceRegistry {
 
         let registered_key = VerifyingKey::from_bytes(&device.public_key)
             .map_err(|_| RegistryError::CorruptRecord)?;
-        signed_request
+        let request = signed_request
             .verify(device.device_id, &registered_key)
-            .map_err(RegistryError::RequestVerification)
+            .map_err(RegistryError::RequestVerification)?;
+        Ok(AuthenticatedRequest { request })
+    }
+
+    pub(crate) fn grant_task_permission(
+        &self,
+        device_id: Uuid,
+        task_id: &str,
+    ) -> Result<bool, RegistryError> {
+        let device = self.get(device_id)?.ok_or(RegistryError::UnknownDevice)?;
+        if device.status == DeviceStatus::Revoked {
+            return Err(RegistryError::RevokedDevice);
+        }
+
+        let changed = self
+            .connection
+            .execute(
+                "INSERT OR IGNORE INTO device_task_permissions (device_id, task_id)
+                 VALUES (?1, ?2)",
+                params![device_id.to_string(), task_id],
+            )
+            .map_err(map_database_error)?;
+        Ok(changed > 0)
+    }
+
+    pub(crate) fn revoke_task_permission(
+        &self,
+        device_id: Uuid,
+        task_id: &str,
+    ) -> Result<bool, RegistryError> {
+        let changed = self
+            .connection
+            .execute(
+                "DELETE FROM device_task_permissions WHERE device_id = ?1 AND task_id = ?2",
+                params![device_id.to_string(), task_id],
+            )
+            .map_err(map_database_error)?;
+        Ok(changed > 0)
+    }
+
+    pub(crate) fn task_permission_status(
+        &self,
+        device_id: Uuid,
+        task_id: &str,
+    ) -> Result<TaskPermissionStatus, RegistryError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT status, EXISTS (
+                    SELECT 1 FROM device_task_permissions
+                    WHERE device_id = trusted_devices.device_id AND task_id = ?2
+                 )
+                 FROM trusted_devices WHERE device_id = ?1",
+                params![device_id.to_string(), task_id],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, bool>(1)?)),
+            )
+            .optional()
+            .map_err(map_database_error)?;
+
+        let Some((status, has_permission)) = row else {
+            return Ok(TaskPermissionStatus::UnknownDevice);
+        };
+        if DeviceStatus::from_str(&status)? == DeviceStatus::Revoked {
+            return Ok(TaskPermissionStatus::Revoked);
+        }
+        if has_permission {
+            Ok(TaskPermissionStatus::Granted)
+        } else {
+            Ok(TaskPermissionStatus::NotGranted)
+        }
     }
 
     fn from_connection(connection: Connection) -> Result<Self, RegistryError> {
+        connection
+            .execute_batch("PRAGMA foreign_keys = ON;")
+            .map_err(map_database_error)?;
         connection
             .execute_batch(REGISTRY_SCHEMA)
             .map_err(map_database_error)?;

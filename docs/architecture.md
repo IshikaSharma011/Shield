@@ -52,18 +52,29 @@ Authentication uses the untrusted request's device ID only to find a registry
 record. It rejects unknown and revoked devices, then verifies the Phase 2
 signature with the key read from SQLite. The request cannot supply its own
 trusted key. Enrollment is separate from authentication; both are separate
-from task authorization, which is not implemented yet.
+from task authorization.
+
+## Phase 4: task authorization
+
+`src/authorization.rs` defines a small fixed catalog of task IDs and parameter
+schemas. A device receives no task permissions automatically. An operator
+explicitly grants a catalog task to a currently trusted device; grants are
+stored in the same SQLite registry and are checked on each authorization.
+Authorization accepts an `AuthenticatedRequest`, a value produced only after
+registry-backed signature verification, then rechecks current trust, grant,
+and exact parameter names and allowed values. It returns a structured allowed
+or denied result and never runs a command.
 
 ## Intended objectives
 
-Future work may include task authorization, replay prevention, SQLite audit
-logging, and integration interfaces. These features are not implemented in
-Phase 3.
+Future work may include replay prevention, SQLite audit logging, and
+integration interfaces.
 
 ## Scope boundary
 
 Authentication checks that a trusted, non-revoked record's public key signed
-the request. It does not decide whether the requested task is authorized.
+the request. Authorization is a separate decision based on task allow-list,
+device grant, and parameter schema.
 Requests are not checked for age or prior use, so timestamps and nonces do
 not yet prevent replay. There is no network communication, audit logging, or
 system-command execution. The project is an academic demonstration, not a
