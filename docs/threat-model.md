@@ -2,10 +2,12 @@
 
 ## System in scope
 
-Phase 4 consists of a local Rust CLI and library. It creates device
+Phase 5 consists of a local Rust CLI and library. It creates device
 identities, serializes and signs requests, stores manually enrolled public-key
 records with trusted or revoked status in SQLite, and evaluates task requests
-against explicit per-device grants and predefined parameter schemas.
+against explicit per-device grants and predefined parameter schemas. It also
+checks authenticated requests for timestamp validity and records replay keys
+in the same SQLite registry.
 
 ## Security objectives
 
@@ -19,9 +21,9 @@ using the request's device ID; the request itself contains no public key.
 
 The signature detects request modification and proves possession of the
 private key corresponding to the supplied public key. This is not by itself
-trusted-device authentication or task authorization. Replayed requests,
-expired timestamps, unauthorized task execution, network threats, and
-audit-log tampering are not mitigated. A local attacker who can access an
+trusted-device authentication or task authorization. Replay checks use local
+SQLite state and do not provide cross-machine protection. Network threats,
+unauthorized task execution, and audit-log tampering are not mitigated. A local attacker who can access an
 unlocked credential store may be able to retrieve the signing key.
 
 ## Assumptions and limitations
@@ -31,11 +33,16 @@ the host OS, account configuration, and whether the store is unlocked. The
 key is present in process memory while loaded; clearing temporary buffers
 cannot guarantee removal of every runtime or operating-system copy. There is
 no hardware-backed key storage or automatic registry synchronization.
-Tampering with the local registry database could change trust or permission
-decisions. The authorization catalog is intentionally small and fixed, and
-authorization only returns a decision; no task runner is present.
+Tampering with or restoring an old copy of the local registry database could
+change trust, permission, or replay decisions. The authorization catalog is
+intentionally small and fixed, and authorization only returns a decision; no
+task runner is present. System clock error can reject otherwise valid requests
+or affect timestamp decisions. Client timestamps cannot establish trusted time.
 Replacing a local key cannot revoke an old public key already copied by
-another installation. The request parser imposes size limits, but the caller
-must still apply expiry and replay checks, which are not implemented.
+another installation. Replay records are retained until their request cannot
+pass the configured age check, then deleted during a later replay check. An
+operator must preserve the database and its backups to preserve replay history.
+The request parser imposes size limits, and authorization applies the current
+allow-list and parameter schemas.
 Tests establish expected behavior, not effectiveness against a determined
 attacker.

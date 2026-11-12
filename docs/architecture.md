@@ -65,17 +65,33 @@ registry-backed signature verification, then rechecks current trust, grant,
 and exact parameter names and allowed values. It returns a structured allowed
 or denied result and never runs a command.
 
+## Phase 5: replay protection
+
+`src/replay_protection.rs` checks the timestamp of an authenticated request
+against a configurable maximum age and clock-skew allowance. It then stores
+the request ID and nonce in the registry's SQLite database in an immediate
+transaction. Both fields are unique within the authenticated device's scope.
+The existing Phase 2 signed format already binds the device ID, request ID,
+timestamp, nonce, task ID, and parameters. The request constructor obtains IDs
+and nonces from the operating-system random source. A nonce alone is not
+treated as proof of freshness; the verifier checks persistent state and time.
+
+Expired replay records are removed during a later check only after their
+request validity window ends. Clearing the database or restoring an old copy
+can erase replay history. The system clock must be reasonably accurate; a
+clock that moves backward or forward can cause valid requests to be denied or
+affect expiry decisions. This phase still has no network protocol or
+server-issued challenge.
+
 ## Intended objectives
 
-Future work may include replay prevention, SQLite audit logging, and
-integration interfaces.
+Future work may include SQLite audit logging and integration interfaces.
 
 ## Scope boundary
 
 Authentication checks that a trusted, non-revoked record's public key signed
 the request. Authorization is a separate decision based on task allow-list,
 device grant, and parameter schema.
-Requests are not checked for age or prior use, so timestamps and nonces do
-not yet prevent replay. There is no network communication, audit logging, or
-system-command execution. The project is an academic demonstration, not a
-security certification.
+Requests are checked for age and prior use in the local registry. There is no
+network communication, audit logging, or system-command execution. The project
+is an academic demonstration, not a security certification.

@@ -24,6 +24,14 @@ CREATE TABLE IF NOT EXISTS device_task_permissions (
     device_id TEXT NOT NULL REFERENCES trusted_devices(device_id) ON DELETE CASCADE,
     task_id TEXT NOT NULL,
     PRIMARY KEY (device_id, task_id)
+);
+CREATE TABLE IF NOT EXISTS replay_requests (
+    device_id TEXT NOT NULL REFERENCES trusted_devices(device_id) ON DELETE CASCADE,
+    request_id TEXT NOT NULL,
+    nonce BLOB NOT NULL CHECK (length(nonce) = 32),
+    expires_at INTEGER NOT NULL CHECK (expires_at >= 0),
+    PRIMARY KEY (device_id, request_id),
+    UNIQUE (device_id, nonce)
 );";
 
 /// Current trust state for a manually enrolled device.
@@ -320,7 +328,106 @@ impl DeviceRegistry {
         }
     }
 
+    /// Atomically reserves a fresh request ID and nonce for one authenticated
+    /// device. The immediate transaction serializes concurrent attempts.
+    pub(crate) fn record_fresh_request(
+        &self,
+        device_id: Uuid,
+        request_id: Uuid,
+        nonce: &[u8; 32],
+        now_ms: u64,
+        expires_at_ms: u64,
+    ) -> Result<(), ReplayRecordError> {
+        let now_db = i64::try_from(now_ms).map_err(|_| ReplayRecordError::StorageUnavailable)?;
+        let expiry_db =
+            i64::try_from(expires_at_ms).map_err(|_| ReplayRecordError::StorageUnavailable)?;
+        self.connection
+            .execute_batch("BEGIN IMMEDIATE")
+            .map_err(|_| ReplayRecordError::StorageUnavailable)?;
+
+        // rusqlite's checked transaction API needs `&mut Connection`. This
+        // registry intentionally exposes shared-reference methods, so keep
+        // the explicit transaction scoped here and always commit or roll back.
+        let result = (|| {
+            let status = self
+                .connection
+                .query_row(
+                    "SELECT status FROM trusted_devices WHERE device_id = ?1",
+                    [device_id.to_string()],
+                    |row| row.get::<_, String>(0),
+                )
+                .optional()
+                .map_err(|_| ReplayRecordError::StorageUnavailable)?;
+            match status.as_deref() {
+                Some("trusted") => {}
+                Some("revoked") => return Err(ReplayRecordError::RevokedDevice),
+                _ => return Err(ReplayRecordError::UnknownDevice),
+            }
+
+            self.connection
+                .execute(
+                    "DELETE FROM replay_requests WHERE expires_at < ?1",
+                    [now_db],
+                )
+                .map_err(|_| ReplayRecordError::StorageUnavailable)?;
+
+            let device_id_text = device_id.to_string();
+            let request_id_text = request_id.to_string();
+            let request_seen = self
+                .connection
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM replay_requests
+                     WHERE device_id = ?1 AND request_id = ?2)",
+                    params![device_id_text, request_id_text],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|_| ReplayRecordError::StorageUnavailable)?;
+            if request_seen {
+                return Err(ReplayRecordError::RepeatedRequestId);
+            }
+
+            let nonce_seen = self
+                .connection
+                .query_row(
+                    "SELECT EXISTS (SELECT 1 FROM replay_requests
+                     WHERE device_id = ?1 AND nonce = ?2)",
+                    params![device_id_text, nonce.as_slice()],
+                    |row| row.get::<_, bool>(0),
+                )
+                .map_err(|_| ReplayRecordError::StorageUnavailable)?;
+            if nonce_seen {
+                return Err(ReplayRecordError::ReusedNonce);
+            }
+
+            self.connection
+                .execute(
+                    "INSERT INTO replay_requests (device_id, request_id, nonce, expires_at)
+                     VALUES (?1, ?2, ?3, ?4)",
+                    params![device_id_text, request_id_text, nonce.as_slice(), expiry_db],
+                )
+                .map_err(|_| ReplayRecordError::StorageUnavailable)?;
+            Ok(())
+        })();
+
+        match result {
+            Ok(()) => match self.connection.execute_batch("COMMIT") {
+                Ok(()) => Ok(()),
+                Err(_) => {
+                    let _ = self.connection.execute_batch("ROLLBACK");
+                    Err(ReplayRecordError::StorageUnavailable)
+                }
+            },
+            Err(error) => {
+                let _ = self.connection.execute_batch("ROLLBACK");
+                Err(error)
+            }
+        }
+    }
+
     fn from_connection(connection: Connection) -> Result<Self, RegistryError> {
+        connection
+            .busy_timeout(std::time::Duration::from_secs(5))
+            .map_err(map_database_error)?;
         connection
             .execute_batch("PRAGMA foreign_keys = ON;")
             .map_err(map_database_error)?;
@@ -329,6 +436,15 @@ impl DeviceRegistry {
             .map_err(map_database_error)?;
         Ok(Self { connection })
     }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum ReplayRecordError {
+    RepeatedRequestId,
+    ReusedNonce,
+    UnknownDevice,
+    RevokedDevice,
+    StorageUnavailable,
 }
 
 /// Returns a SHA-256 fingerprint suitable for manual comparison. The hash is
