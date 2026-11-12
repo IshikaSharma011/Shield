@@ -2,14 +2,16 @@
 
 ## System in scope
 
-Phase 7 consists of a local Rust CLI and library. It creates device
+Phase 8 consists of a local Rust CLI and library. It creates device
 identities, serializes and signs requests, stores manually enrolled public-key
 records with trusted or revoked status in SQLite, and evaluates task requests
 against explicit per-device grants and predefined parameter schemas. It also
 checks authenticated requests for timestamp validity and records replay keys
 and security decisions in the migrated SQLite database. The integrated
 security engine composes authentication, replay checks, and authorization and
-returns a simulated approval or structured rejection.
+returns a simulated approval or structured rejection. The interactive
+demonstration uses only an in-memory database and ephemeral test identities,
+so it cannot change a normal registry database.
 
 ## Security objectives
 

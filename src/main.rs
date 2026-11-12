@@ -24,6 +24,12 @@ enum Command {
         #[command(subcommand)]
         action: AuthorizationAction,
     },
+    /// Start the isolated, in-memory interactive security demonstration.
+    Demo {
+        /// Explicitly load temporary, labeled sample test data.
+        #[arg(long)]
+        setup_demo_data: bool,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -209,6 +215,9 @@ fn run() -> Result<(), Box<dyn Error>> {
                 }
             }
         },
+        Some(Command::Demo { setup_demo_data }) => {
+            shield::demo_shell::run_interactive(setup_demo_data)?;
+        }
     }
     Ok(())
 }

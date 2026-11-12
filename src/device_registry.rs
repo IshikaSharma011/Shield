@@ -246,6 +246,16 @@ impl DeviceRegistry {
             .map_err(map_storage_error)
     }
 
+    /// Returns a bounded slice of persisted security decisions.
+    pub fn security_logs(
+        &self,
+        limit: usize,
+    ) -> Result<Vec<crate::database::SecurityLog>, RegistryError> {
+        self.database
+            .security_logs(limit)
+            .map_err(map_storage_error)
+    }
+
     /// Marks an enrolled device as revoked. Repeating the operation is safe
     /// and returns the already-revoked record.
     pub fn revoke(&self, device_id: Uuid) -> Result<RegisteredDevice, RegistryError> {

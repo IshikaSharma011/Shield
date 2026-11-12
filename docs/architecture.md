@@ -111,6 +111,17 @@ The sender can use `SecurityEngine::create_signed_request` with a
 `DeviceIdentity`; it relies on the Phase 2 canonical request format and
 signature implementation. Existing lower-level APIs remain available.
 
+## Phase 8: interactive terminal demonstration
+
+`src/demo_shell.rs` provides a line-based menu over the actual
+`SecurityEngine`. It uses an in-memory SQLite registry so demo registrations,
+permissions, replay entries, and logs cannot modify an existing database file.
+Temporary sample identities and a limited task grant are created only when the
+operator uses `shield demo --setup-demo-data`, and are labeled as test data.
+The menu can also register an ephemeral identity after the operator confirms
+the displayed public-key fingerprint, then explicitly grant one predefined
+task. The interface contains no network path or task executor.
+
 ## Intended objectives
 
 Future work may include networking and integration interfaces.

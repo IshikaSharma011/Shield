@@ -3,7 +3,7 @@
 Shield is a standalone cybersecurity framework being developed in Rust for
 the DaemonONE distributed operating environment.
 
-## Current status: Phase 7
+## Current status: Phase 8
 
 Shield creates a device identity with a random UUID and Ed25519 key pair. It
 stores the private key in the operating system's credential store and displays
@@ -20,8 +20,10 @@ prevention scoped to each authenticated device. This project still does not
 communicate over a network. Phase 6 adds versioned SQLite migrations and
 privacy-conscious security decision logs. Phase 7 integrates authentication,
 replay prevention, and authorization into one ordered pipeline that returns a
-simulated approval without executing a task. Do not use this project as a
-production security system.
+simulated approval without executing a task. Phase 8 adds an interactive
+terminal demonstration backed by an in-memory database. Demo records disappear
+when the process exits and cannot modify existing registry database files. Do
+not use this project as a production security system.
 
 ## Planned objectives
 
@@ -30,8 +32,9 @@ production security system.
 
 Device identity creation, signed requests, trusted-device enrollment,
 authentication, revocation, allow-list authorization, replay prevention,
-SQLite security decision logging, and the integrated request pipeline are
-implemented. Networking and task execution remain out of scope.
+SQLite security decision logging, the integrated request pipeline, and the
+interactive academic demonstration are implemented. Networking and task
+execution remain out of scope.
 
 ## Requirements
 
@@ -52,6 +55,8 @@ cargo run -- registry revoke --database shield-registry.sqlite3 --device-id <UUI
 cargo run -- authorization tasks
 cargo run -- registry grant-task --database shield-registry.sqlite3 --device-id <UUID> --task-id status.report
 cargo run -- registry revoke-task --database shield-registry.sqlite3 --device-id <UUID> --task-id status.report
+cargo run -- demo
+cargo run -- demo --setup-demo-data
 ```
 
 ## Project layout
@@ -66,6 +71,7 @@ cargo run -- registry revoke-task --database shield-registry.sqlite3 --device-id
 - `docs/replay-protection.md`: freshness policy, atomic replay checks, and limits.
 - `docs/database.md`: tables, migrations, backups, and log retention.
 - `docs/security-engine.md`: complete request-validation flow and result types.
+- `docs/demo-shell.md`: terminal demonstration and academic presentation steps.
 - `docs/architecture.md`: architecture and phase boundaries.
 - `docs/threat-model.md`: current security scope and limitations.
 

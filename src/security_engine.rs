@@ -6,7 +6,7 @@ use uuid::Uuid;
 
 use crate::{
     authorization::{AuthorizationDecision, AuthorizationEngine, RejectionReason},
-    database::SecurityEvent,
+    database::{SecurityEvent, SecurityLog},
     device_identity::DeviceIdentity,
     device_registry::{AuthenticatedRequest, DeviceRegistry, RegistryError},
     replay_protection::{ReplayProtection, ReplayRejectionReason},
@@ -76,6 +76,28 @@ impl SecurityEngine {
     /// Provides access to enrollment and permission management operations.
     pub fn registry(&self) -> &DeviceRegistry {
         &self.registry
+    }
+
+    /// Runs the existing registry-backed signature authentication step.
+    pub fn verify_device_authentication(
+        &self,
+        signed_request: &SignedRequest,
+    ) -> Result<AuthenticatedRequest, RegistryError> {
+        self.registry.authenticate_request(signed_request)
+    }
+
+    /// Runs the existing allow-list authorization step for an authenticated
+    /// request. This does not perform replay checking or execute a task.
+    pub fn check_task_authorization(
+        &self,
+        authenticated: &AuthenticatedRequest,
+    ) -> crate::authorization::AuthorizationResult {
+        self.authorization.authorize(&self.registry, authenticated)
+    }
+
+    /// Reads recent audit rows through the registry's migrated SQLite store.
+    pub fn security_audit_logs(&self, limit: usize) -> Result<Vec<SecurityLog>, RegistryError> {
+        self.registry.security_logs(limit)
     }
 
     /// Creates and signs a request using an identity supplied by the caller.

@@ -23,5 +23,7 @@ allow-lists; authorization returns a decision and does not execute tasks.
 Phase 5 adds timestamp validation and SQLite-backed replay prevention. Phase 6
 adds versioned SQLite migrations and privacy-conscious security decision logs.
 Phase 7 composes the security checks into a single pipeline and returns a
-simulated result without running tasks. Networking is not implemented yet.
+simulated result without running tasks. Phase 8 provides an in-memory
+interactive terminal demonstration using that pipeline. Networking is not
+implemented yet.
 Never treat device discovery or request-supplied key material as proof of trust.

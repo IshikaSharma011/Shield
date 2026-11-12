@@ -41,3 +41,7 @@ from the returned rejection because the request cannot yet be trusted.
 The project does not add transport or networking. Integrators must call the
 pipeline after obtaining the signed request through their own trusted input
 boundary. There is no operating-system command executor.
+
+The Phase 8 terminal shell calls the same engine methods for authentication,
+authorization, and full request processing. Its database is in memory and
+isolated from the normal registry database.

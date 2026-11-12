@@ -1,6 +1,7 @@
 pub mod authorization;
 pub mod config;
 pub mod database;
+pub mod demo_shell;
 pub mod device_identity;
 pub mod device_registry;
 pub mod error;
