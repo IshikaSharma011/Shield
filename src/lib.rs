@@ -1,4 +1,5 @@
 pub mod config;
+pub mod device_identity;
 pub mod error;
 
 /// Returns the welcome message shown by the command-line application.

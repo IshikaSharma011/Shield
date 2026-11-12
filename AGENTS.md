@@ -16,6 +16,7 @@
 - Add tests for security behavior as each security module is implemented.
 - Do not commit, push, merge, or reset without explicit approval.
 
-Phase 0 is only a project foundation. Do not describe the current application
-as providing authentication, authorization, replay prevention, or audit
-logging.
+Phase 1 provides local device identity generation, OS credential-store
+persistence, identity display, and public-key export. Do not describe it as
+providing trusted-device authentication, task authorization, replay
+prevention, networking, or audit logging.
