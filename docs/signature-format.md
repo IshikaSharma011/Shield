@@ -55,8 +55,9 @@ let signed = sign_request(&request, &sender_identity)?;
 let verified = signed.verify(device_id, &registered_public_key)?;
 ```
 
-The example shows the API flow only. Shield does not yet implement a trusted-
-device registry or network transport.
+The example shows the API flow only. Phase 3 now provides the trusted-device
+registry that supplies the registered public key. Network transport is not
+implemented.
 
 ## What verification proves
 

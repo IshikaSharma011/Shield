@@ -51,7 +51,7 @@ account or an unlocked store may expose the private key. The key is also in
 process memory while loaded, so clearing temporary buffers does not guarantee
 that every copy is erased by the runtime or OS.
 
-This phase has no key rotation command or revocation registry. Replacing a key
-does not notify other devices that have already trusted the old public key.
-Until a later phase adds revocation, each peer that enrolled the old key must
-be updated manually.
+There is no key rotation command. The Phase 3 registry can mark a local device
+record revoked, but that status is not synchronized to other installations.
+Replacing a key does not notify peers that already trusted the old public key;
+operators must update those peers manually.

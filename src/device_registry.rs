@@ -1,0 +1,546 @@
+//! Persistent trusted-device enrollment, authentication, and revocation.
+
+use std::{
+    fmt,
+    path::Path,
+    time::{SystemTime, UNIX_EPOCH},
+};
+
+use ed25519_dalek::VerifyingKey;
+use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
+use sha2::{Digest, Sha256};
+use uuid::Uuid;
+
+use crate::signature::{SignatureError, SignedRequest, TaskRequest};
+
+const REGISTRY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS trusted_devices (
+    device_id TEXT PRIMARY KEY NOT NULL,
+    public_key BLOB NOT NULL UNIQUE CHECK (length(public_key) = 32),
+    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 128),
+    registered_at INTEGER NOT NULL CHECK (registered_at >= 0),
+    status TEXT NOT NULL CHECK (status IN ('trusted', 'revoked'))
+);";
+
+/// Current trust state for a manually enrolled device.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DeviceStatus {
+    Trusted,
+    Revoked,
+}
+
+impl DeviceStatus {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::Trusted => "trusted",
+            Self::Revoked => "revoked",
+        }
+    }
+
+    fn from_str(value: &str) -> Result<Self, RegistryError> {
+        match value {
+            "trusted" => Ok(Self::Trusted),
+            "revoked" => Ok(Self::Revoked),
+            _ => Err(RegistryError::CorruptRecord),
+        }
+    }
+}
+
+impl fmt::Display for DeviceStatus {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        formatter.write_str(match self {
+            Self::Trusted => "trusted",
+            Self::Revoked => "revoked",
+        })
+    }
+}
+
+/// Public information stored for one enrolled device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RegisteredDevice {
+    pub device_id: Uuid,
+    pub public_key: [u8; 32],
+    pub name: String,
+    /// Unix time in milliseconds.
+    pub registered_at: u64,
+    pub status: DeviceStatus,
+}
+
+/// A SQLite-backed collection of manually trusted devices.
+pub struct DeviceRegistry {
+    connection: Connection,
+}
+
+impl DeviceRegistry {
+    /// Opens or creates a registry database at `path`.
+    pub fn open(path: impl AsRef<Path>) -> Result<Self, RegistryError> {
+        let connection = Connection::open(path).map_err(map_database_error)?;
+        Self::from_connection(connection)
+    }
+
+    /// Opens a temporary in-memory registry, primarily useful for tests and
+    /// short-lived demonstrations.
+    pub fn open_in_memory() -> Result<Self, RegistryError> {
+        let connection = Connection::open_in_memory().map_err(map_database_error)?;
+        Self::from_connection(connection)
+    }
+
+    /// Manually enrolls a device after comparing the supplied fingerprint
+    /// with the fingerprint verified out of band by the operator.
+    pub fn enroll(
+        &self,
+        device_id: Uuid,
+        public_key: [u8; 32],
+        name: &str,
+        confirmed_fingerprint: &str,
+    ) -> Result<RegisteredDevice, RegistryError> {
+        let name = name.trim();
+        if name.is_empty() || name.len() > 128 {
+            return Err(RegistryError::InvalidName);
+        }
+        VerifyingKey::from_bytes(&public_key).map_err(|_| RegistryError::InvalidPublicKey)?;
+
+        let fingerprint = public_key_fingerprint(&public_key);
+        if !fingerprint.eq_ignore_ascii_case(confirmed_fingerprint) {
+            return Err(RegistryError::FingerprintMismatch);
+        }
+
+        let registered_at = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .map_err(|_| RegistryError::ClockUnavailable)?
+            .as_millis()
+            .try_into()
+            .map_err(|_| RegistryError::ClockUnavailable)?;
+        let registered_at_db =
+            i64::try_from(registered_at).map_err(|_| RegistryError::ClockUnavailable)?;
+
+        self.connection
+            .execute(
+                "INSERT INTO trusted_devices
+                    (device_id, public_key, name, registered_at, status)
+                 VALUES (?1, ?2, ?3, ?4, ?5)",
+                params![
+                    device_id.to_string(),
+                    public_key.as_slice(),
+                    name,
+                    registered_at_db,
+                    DeviceStatus::Trusted.as_str(),
+                ],
+            )
+            .map_err(map_database_error)?;
+
+        Ok(RegisteredDevice {
+            device_id,
+            public_key,
+            name: name.to_owned(),
+            registered_at,
+            status: DeviceStatus::Trusted,
+        })
+    }
+
+    /// Returns the record for a device ID, or `None` if it is not registered.
+    pub fn get(&self, device_id: Uuid) -> Result<Option<RegisteredDevice>, RegistryError> {
+        let row = self
+            .connection
+            .query_row(
+                "SELECT device_id, public_key, name, registered_at, status
+                 FROM trusted_devices WHERE device_id = ?1",
+                [device_id.to_string()],
+                read_record,
+            )
+            .optional()
+            .map_err(map_database_error)?;
+        row.map(decode_record).transpose()
+    }
+
+    /// Returns all records, ordered by their device ID.
+    pub fn list(&self) -> Result<Vec<RegisteredDevice>, RegistryError> {
+        let mut statement = self
+            .connection
+            .prepare(
+                "SELECT device_id, public_key, name, registered_at, status
+                 FROM trusted_devices ORDER BY device_id",
+            )
+            .map_err(map_database_error)?;
+        let rows = statement
+            .query_map([], read_record)
+            .map_err(map_database_error)?;
+        rows.map(|row| {
+            let row = row.map_err(map_database_error)?;
+            decode_record(row)
+        })
+        .collect()
+    }
+
+    /// Marks an enrolled device as revoked. Repeating the operation is safe
+    /// and returns the already-revoked record.
+    pub fn revoke(&self, device_id: Uuid) -> Result<RegisteredDevice, RegistryError> {
+        let mut device = self.get(device_id)?.ok_or(RegistryError::UnknownDevice)?;
+        if device.status == DeviceStatus::Trusted {
+            self.connection
+                .execute(
+                    "UPDATE trusted_devices SET status = ?1 WHERE device_id = ?2",
+                    params![DeviceStatus::Revoked.as_str(), device_id.to_string()],
+                )
+                .map_err(map_database_error)?;
+            device.status = DeviceStatus::Revoked;
+        }
+        Ok(device)
+    }
+
+    /// Authenticates a signed request using only the public key in this
+    /// registry. The request's device ID is untrusted until verification; no
+    /// key is accepted from request data.
+    pub fn authenticate(
+        &self,
+        signed_request: &SignedRequest,
+    ) -> Result<TaskRequest, RegistryError> {
+        let untrusted_request = TaskRequest::deserialize(signed_request.request_bytes())
+            .map_err(RegistryError::RequestVerification)?;
+        let device = self
+            .get(untrusted_request.device_id)?
+            .ok_or(RegistryError::UnknownDevice)?;
+        if device.status == DeviceStatus::Revoked {
+            return Err(RegistryError::RevokedDevice);
+        }
+
+        let registered_key = VerifyingKey::from_bytes(&device.public_key)
+            .map_err(|_| RegistryError::CorruptRecord)?;
+        signed_request
+            .verify(device.device_id, &registered_key)
+            .map_err(RegistryError::RequestVerification)
+    }
+
+    fn from_connection(connection: Connection) -> Result<Self, RegistryError> {
+        connection
+            .execute_batch(REGISTRY_SCHEMA)
+            .map_err(map_database_error)?;
+        Ok(Self { connection })
+    }
+}
+
+/// Returns a SHA-256 fingerprint suitable for manual comparison. The hash is
+/// over the 32 raw public-key bytes, not the formatted export string.
+pub fn public_key_fingerprint(public_key: &[u8; 32]) -> String {
+    let digest = Sha256::digest(public_key);
+    format!("SHA256:{}", encode_hex(&digest))
+}
+
+/// Parses the `ed25519:<hex>` public-key representation produced by Shield.
+pub fn parse_public_key_export(value: &str) -> Result<[u8; 32], RegistryError> {
+    let encoded = value
+        .strip_prefix("ed25519:")
+        .ok_or(RegistryError::InvalidPublicKey)?;
+    if encoded.len() != 64 {
+        return Err(RegistryError::InvalidPublicKey);
+    }
+
+    let mut bytes = [0_u8; 32];
+    for (index, pair) in encoded.as_bytes().chunks_exact(2).enumerate() {
+        let high = decode_hex_digit(pair[0]).ok_or(RegistryError::InvalidPublicKey)?;
+        let low = decode_hex_digit(pair[1]).ok_or(RegistryError::InvalidPublicKey)?;
+        bytes[index] = (high << 4) | low;
+    }
+    VerifyingKey::from_bytes(&bytes).map_err(|_| RegistryError::InvalidPublicKey)?;
+    Ok(bytes)
+}
+
+type RawDeviceRecord = (String, Vec<u8>, String, i64, String);
+
+fn read_record(row: &rusqlite::Row<'_>) -> rusqlite::Result<RawDeviceRecord> {
+    Ok((
+        row.get(0)?,
+        row.get(1)?,
+        row.get(2)?,
+        row.get(3)?,
+        row.get(4)?,
+    ))
+}
+
+fn decode_record(row: RawDeviceRecord) -> Result<RegisteredDevice, RegistryError> {
+    let (device_id, public_key, name, registered_at, status) = row;
+    let device_id = Uuid::parse_str(&device_id).map_err(|_| RegistryError::CorruptRecord)?;
+    let public_key = public_key
+        .try_into()
+        .map_err(|_| RegistryError::CorruptRecord)?;
+    VerifyingKey::from_bytes(&public_key).map_err(|_| RegistryError::CorruptRecord)?;
+    let registered_at = u64::try_from(registered_at).map_err(|_| RegistryError::CorruptRecord)?;
+
+    Ok(RegisteredDevice {
+        device_id,
+        public_key,
+        name,
+        registered_at,
+        status: DeviceStatus::from_str(&status)?,
+    })
+}
+
+fn map_database_error(error: rusqlite::Error) -> RegistryError {
+    match error {
+        rusqlite::Error::SqliteFailure(failure, _)
+            if failure.code == ErrorCode::ConstraintViolation =>
+        {
+            RegistryError::DuplicateIdentity
+        }
+        _ => RegistryError::StorageUnavailable,
+    }
+}
+
+fn encode_hex(bytes: &[u8]) -> String {
+    const HEX: &[u8; 16] = b"0123456789abcdef";
+    let mut encoded = String::with_capacity(bytes.len() * 2);
+    for byte in bytes {
+        encoded.push(HEX[(byte >> 4) as usize] as char);
+        encoded.push(HEX[(byte & 0x0f) as usize] as char);
+    }
+    encoded
+}
+
+fn decode_hex_digit(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
+}
+
+/// Errors raised while enrolling, loading, revoking, or authenticating a
+/// device.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RegistryError {
+    StorageUnavailable,
+    CorruptRecord,
+    InvalidName,
+    InvalidPublicKey,
+    FingerprintMismatch,
+    DuplicateIdentity,
+    UnknownDevice,
+    RevokedDevice,
+    RequestVerification(SignatureError),
+    ClockUnavailable,
+}
+
+impl fmt::Display for RegistryError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::StorageUnavailable => formatter.write_str("The device registry is unavailable."),
+            Self::CorruptRecord => {
+                formatter.write_str("The device registry contains an invalid record.")
+            }
+            Self::InvalidName => {
+                formatter.write_str("A device name must contain 1 to 128 UTF-8 bytes.")
+            }
+            Self::InvalidPublicKey => {
+                formatter.write_str("The Ed25519 public key is malformed or invalid.")
+            }
+            Self::FingerprintMismatch => formatter.write_str(
+                "The public-key fingerprint does not match the independently verified fingerprint.",
+            ),
+            Self::DuplicateIdentity => formatter.write_str(
+                "That device ID or public key is already registered; no record was changed.",
+            ),
+            Self::UnknownDevice => formatter.write_str("The device is not registered."),
+            Self::RevokedDevice => formatter.write_str("The device has been revoked."),
+            Self::RequestVerification(error) => write!(formatter, "{error}"),
+            Self::ClockUnavailable => {
+                formatter.write_str("The system clock could not provide a valid registration time.")
+            }
+        }
+    }
+}
+
+impl std::error::Error for RegistryError {}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::BTreeMap;
+
+    use crate::{
+        device_identity::DeviceIdentity,
+        signature::{sign_request, SignatureError, TaskRequest},
+    };
+
+    use super::{public_key_fingerprint, DeviceRegistry, DeviceStatus, RegistryError};
+
+    fn new_identity() -> DeviceIdentity {
+        DeviceIdentity::generate().expect("OS randomness should be available")
+    }
+
+    fn request_for(identity: &DeviceIdentity) -> TaskRequest {
+        TaskRequest::new(identity.device_id(), "status.report", BTreeMap::new())
+            .expect("create request")
+    }
+
+    fn enroll(registry: &DeviceRegistry, identity: &DeviceIdentity) {
+        let public_key = identity.public_key_bytes();
+        registry
+            .enroll(
+                identity.device_id(),
+                public_key,
+                "test device",
+                &public_key_fingerprint(&public_key),
+            )
+            .expect("enroll test device");
+    }
+
+    #[test]
+    fn trusted_device_authenticates() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let identity = new_identity();
+        enroll(&registry, &identity);
+        let signed = sign_request(&request_for(&identity), &identity).expect("sign request");
+
+        let authenticated = registry
+            .authenticate(&signed)
+            .expect("trusted device should authenticate");
+
+        assert_eq!(authenticated.device_id, identity.device_id());
+    }
+
+    #[test]
+    fn unknown_device_is_rejected() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let identity = new_identity();
+        let signed = sign_request(&request_for(&identity), &identity).expect("sign request");
+
+        assert_eq!(
+            registry.authenticate(&signed),
+            Err(RegistryError::UnknownDevice)
+        );
+    }
+
+    #[test]
+    fn revoked_device_is_rejected() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let identity = new_identity();
+        enroll(&registry, &identity);
+        let signed = sign_request(&request_for(&identity), &identity).expect("sign request");
+        let revoked = registry
+            .revoke(identity.device_id())
+            .expect("revoke device");
+
+        assert_eq!(revoked.status, DeviceStatus::Revoked);
+        assert_eq!(
+            registry.authenticate(&signed),
+            Err(RegistryError::RevokedDevice)
+        );
+    }
+
+    #[test]
+    fn incorrect_registered_public_key_is_rejected() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let sender = new_identity();
+        let incorrect_key = new_identity().public_key_bytes();
+        registry
+            .enroll(
+                sender.device_id(),
+                incorrect_key,
+                "misregistered key",
+                &public_key_fingerprint(&incorrect_key),
+            )
+            .expect("enroll supplied key after matching its fingerprint");
+        let signed = sign_request(&request_for(&sender), &sender).expect("sign request");
+
+        assert_eq!(
+            registry.authenticate(&signed),
+            Err(RegistryError::RequestVerification(
+                SignatureError::InvalidSignature
+            ))
+        );
+    }
+
+    #[test]
+    fn duplicate_device_registration_is_rejected_without_overwriting() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let identity = new_identity();
+        enroll(&registry, &identity);
+        let fingerprint = public_key_fingerprint(&identity.public_key_bytes());
+
+        assert_eq!(
+            registry.enroll(
+                identity.device_id(),
+                identity.public_key_bytes(),
+                "replacement name",
+                &fingerprint,
+            ),
+            Err(RegistryError::DuplicateIdentity)
+        );
+        let saved = registry
+            .get(identity.device_id())
+            .expect("query device")
+            .expect("device remains registered");
+        assert_eq!(saved.name, "test device");
+    }
+
+    #[test]
+    fn duplicate_public_key_is_rejected_for_a_second_device_id() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let identity = new_identity();
+        enroll(&registry, &identity);
+        let fingerprint = public_key_fingerprint(&identity.public_key_bytes());
+        let another_id = uuid::Builder::from_random_bytes([0x24; 16]).into_uuid();
+
+        assert_eq!(
+            registry.enroll(
+                another_id,
+                identity.public_key_bytes(),
+                "duplicate key",
+                &fingerprint,
+            ),
+            Err(RegistryError::DuplicateIdentity)
+        );
+    }
+
+    #[test]
+    fn registration_and_revocation_persist_after_reopening_database() {
+        let identity = new_identity();
+        let path =
+            std::env::temp_dir().join(format!("shield-registry-{}.sqlite3", identity.device_id()));
+        {
+            let registry = DeviceRegistry::open(&path).expect("open file-backed registry");
+            enroll(&registry, &identity);
+            registry
+                .revoke(identity.device_id())
+                .expect("revoke device");
+        }
+
+        let registry = DeviceRegistry::open(&path).expect("reopen file-backed registry");
+        let saved = registry
+            .get(identity.device_id())
+            .expect("query device")
+            .expect("record persists");
+        assert_eq!(saved.status, DeviceStatus::Revoked);
+        drop(registry);
+        std::fs::remove_file(path).expect("remove temporary test database");
+    }
+
+    #[test]
+    fn enrollment_rejects_unverified_fingerprint() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let identity = new_identity();
+
+        assert_eq!(
+            registry.enroll(
+                identity.device_id(),
+                identity.public_key_bytes(),
+                "test device",
+                "SHA256:incorrect",
+            ),
+            Err(RegistryError::FingerprintMismatch)
+        );
+    }
+
+    #[test]
+    fn public_key_export_parsing_matches_fingerprint_input() {
+        let identity = new_identity();
+        let public_key = identity.public_key_bytes();
+        let exported = identity.public_key_export();
+        let parsed = super::parse_public_key_export(&exported).expect("parse public key export");
+
+        assert_eq!(parsed, public_key);
+        assert_eq!(
+            super::public_key_fingerprint(&parsed),
+            public_key_fingerprint(&public_key)
+        );
+    }
+}

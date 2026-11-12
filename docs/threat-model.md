@@ -2,10 +2,10 @@
 
 ## System in scope
 
-Phase 2 consists of a local Rust CLI and library. It creates device
-identities, serializes task requests in a deterministic versioned format,
-signs the exact request bytes, and verifies signatures against public keys
-provided separately by the caller.
+Phase 3 consists of a local Rust CLI and library. It creates device
+identities, serializes and signs requests, and stores manually enrolled
+public-key records with trusted or revoked status in SQLite. Authentication
+uses the stored public key to verify the request signature.
 
 ## Security objectives
 
@@ -30,8 +30,10 @@ The CLI runs as the invoking user. OS credential-store protection depends on
 the host OS, account configuration, and whether the store is unlocked. The
 key is present in process memory while loaded; clearing temporary buffers
 cannot guarantee removal of every runtime or operating-system copy. There is
-no hardware-backed key storage, trust registry, or remote revocation. Replacing
-a local key cannot revoke an old public key already copied by another device.
-The request parser imposes size limits, but the caller still must apply
-authorization, expiry, and replay checks in later phases. Tests establish
-expected behavior, not effectiveness against a determined attacker.
+no hardware-backed key storage or automatic registry synchronization.
+Tampering with the local registry database could change trust decisions.
+Replacing a local key cannot revoke an old public key already copied by
+another installation. The request parser imposes size limits, but the caller
+still must apply authorization, expiry, and replay checks in later phases.
+Tests establish expected behavior, not effectiveness against a determined
+attacker.

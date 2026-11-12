@@ -3,31 +3,30 @@
 Shield is a standalone cybersecurity framework being developed in Rust for
 the DaemonONE distributed operating environment.
 
-## Current status: Phase 2
+## Current status: Phase 3
 
 Shield creates a device identity with a random UUID and Ed25519 key pair. It
 stores the private key in the operating system's credential store and displays
 or exports only the public key. The CLI also prints a welcome message and
 supports `--help` and `--version`.
 
-Phase 2 can create and verify signed request messages, but it does not
-authenticate trusted devices, authorize tasks, reject replayed requests,
-communicate over a network, or write security audit logs. The caller must
-provide the public key already registered for the request's device ID. Do not
-use this phase as a production security system.
+Phase 3 supports explicit manual enrollment with a SHA-256 public-key
+fingerprint, SQLite-backed trusted-device records, authentication using
+Phase 2 signatures, and revocation. It does not authorize tasks, reject
+replayed requests, communicate over a network, or write security audit logs.
+Do not use this phase as a production security system.
 
 ## Planned objectives
 
-- Enroll and revoke trusted devices.
 - Authorize tasks using explicit allow-lists.
 - Prevent replayed and expired requests.
 - Record security decisions in SQLite without logging private key material.
 - Provide an interactive terminal demonstration and integration-ready
   interfaces.
 
-Device identity creation, public-key export, and request signing and
-verification are implemented. Trusted-device registration and authentication,
-authorization, replay prevention, and revocation are planned work.
+Device identity creation, signed requests, trusted-device enrollment,
+authentication, and revocation are implemented. Task authorization, replay
+prevention, networking, and security audit logging remain planned work.
 
 ## Requirements
 
@@ -42,6 +41,9 @@ cargo run -- --version
 cargo run -- identity create
 cargo run -- identity show
 cargo run -- identity export-public-key
+cargo run -- registry list --database shield-registry.sqlite3
+cargo run -- registry enroll --database shield-registry.sqlite3 --device-id <UUID> --name <NAME> --public-key <ED25519_PUBLIC_KEY> --fingerprint <SHA256_FINGERPRINT>
+cargo run -- registry revoke --database shield-registry.sqlite3 --device-id <UUID>
 ```
 
 ## Project layout
@@ -51,6 +53,7 @@ cargo run -- identity export-public-key
 - `tests/`: integration tests.
 - `docs/device-identity.md`: identity generation, storage, and key lifecycle.
 - `docs/signature-format.md`: request serialization and signature verification.
+- `docs/device-registry.md`: enrollment, authentication, and revocation.
 - `docs/architecture.md`: architecture and phase boundaries.
 - `docs/threat-model.md`: current security scope and limitations.
 
@@ -59,16 +62,17 @@ cargo run -- identity export-public-key
 Clap parses command-line arguments. `uuid` creates random device IDs,
 `ed25519-dalek` creates and verifies Ed25519 signatures, and `rand_core`
 supplies the operating-system random source. `uuid` represents device and
-request IDs. `keyring` accesses native OS credential stores. `zeroize` clears
-temporary private-key buffers where practical. Error handling uses Rust's
-standard library.
+request IDs. `keyring` accesses native OS credential stores. `rusqlite` stores
+public registry records, and `sha2` computes enrollment fingerprints.
+`zeroize` clears temporary private-key buffers where practical. Error handling
+uses Rust's standard library.
 
 ## Key lifecycle limitations
 
 Keys are currently created once per OS account credential entry. Replacing a
-key does not notify devices that already enrolled the old public key. Shield
-does not yet provide a trusted-device registry or a remote revocation flow;
-those peers must be updated manually until a later phase implements one.
+key does not notify other installations that enrolled the old public key.
+Revocation is stored in the local registry; registry changes are not shared
+with peers automatically.
 
 ## License
 

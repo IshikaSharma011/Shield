@@ -1,5 +1,6 @@
 pub mod config;
 pub mod device_identity;
+pub mod device_registry;
 pub mod error;
 pub mod signature;
 

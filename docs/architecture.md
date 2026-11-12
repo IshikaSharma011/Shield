@@ -40,19 +40,31 @@ Request bytes and signature bytes are separate fields in `SignedRequest`.
 This phase adds no trusted-device registry, network communication, timestamp
 expiry check, or replay detection.
 
+## Phase 3: trusted device registry
+
+`src/device_registry.rs` stores device IDs, validated Ed25519 public keys,
+names, registration times, and trusted/revoked status in SQLite. Enrollment
+requires an operator-provided SHA-256 fingerprint that matches the supplied
+public key. Unique database constraints prevent a device ID or public key
+from being registered twice.
+
+Authentication uses the untrusted request's device ID only to find a registry
+record. It rejects unknown and revoked devices, then verifies the Phase 2
+signature with the key read from SQLite. The request cannot supply its own
+trusted key. Enrollment is separate from authentication; both are separate
+from task authorization, which is not implemented yet.
+
 ## Intended objectives
 
-Future work may include trusted-device authentication and revocation, task
-authorization, replay prevention, SQLite audit logging, and integration
-interfaces. These features are not implemented in Phase 2.
+Future work may include task authorization, replay prevention, SQLite audit
+logging, and integration interfaces. These features are not implemented in
+Phase 3.
 
 ## Scope boundary
 
-This phase verifies that the supplied registered public key signed a request;
-it does not decide whether the sender is trusted or whether the requested task
-is authorized. Requests are not checked for age or prior use, so timestamps
-and nonces are signed but do not yet prevent replay. There is no network
-communication, audit logging, or system-command execution. Key rotation does
-not notify peers holding an old public key, and remote revocation is not
-implemented. The project is an academic demonstration, not a security
-certification.
+Authentication checks that a trusted, non-revoked record's public key signed
+the request. It does not decide whether the requested task is authorized.
+Requests are not checked for age or prior use, so timestamps and nonces do
+not yet prevent replay. There is no network communication, audit logging, or
+system-command execution. The project is an academic demonstration, not a
+security certification.

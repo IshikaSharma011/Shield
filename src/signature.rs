@@ -210,6 +210,24 @@ pub struct SignedRequest {
 }
 
 impl SignedRequest {
+    /// Reconstructs a signed request from detached request and signature
+    /// fields, as a transport or storage adapter would do. Verification is
+    /// still required before trusting either field.
+    pub fn from_parts(
+        request_bytes: Vec<u8>,
+        signature_bytes: &[u8],
+    ) -> Result<Self, SignatureError> {
+        if signature_bytes.len() != SIGNATURE_LEN {
+            return Err(SignatureError::MalformedSignature);
+        }
+        let mut signature = [0_u8; SIGNATURE_LEN];
+        signature.copy_from_slice(signature_bytes);
+        Ok(Self {
+            request_bytes,
+            signature,
+        })
+    }
+
     /// Returns the exact request bytes that were signed.
     pub fn request_bytes(&self) -> &[u8] {
         &self.request_bytes
@@ -652,5 +670,21 @@ mod tests {
 
         assert_eq!(detached.request_bytes(), signed.request_bytes());
         assert_eq!(detached.signature_bytes(), signed.signature_bytes());
+    }
+
+    #[test]
+    fn detached_parts_can_be_reconstructed_before_verification() {
+        let (identity, request) = identity_and_request();
+        let signed = sign_request(&request, &identity).expect("sign request");
+        let reconstructed =
+            SignedRequest::from_parts(signed.request_bytes().to_vec(), signed.signature_bytes())
+                .expect("reconstruct detached request");
+        let registered_key = VerifyingKey::from_bytes(&identity.public_key_bytes())
+            .expect("registered public key is valid");
+
+        assert_eq!(
+            reconstructed.verify(identity.device_id(), &registered_key),
+            Ok(request)
+        );
     }
 }

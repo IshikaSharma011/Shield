@@ -16,8 +16,8 @@
 - Add tests for security behavior as each security module is implemented.
 - Do not commit, push, merge, or reset without explicit approval.
 
-Phase 2 adds deterministic signed task requests and public-key verification.
-The verifier must use the public key registered for the request's device ID.
-Do not describe the project as providing trusted-device registry,
-authorization, replay prevention, networking, or audit logging until those
-phases are implemented.
+Phase 3 adds fingerprint-checked manual enrollment, SQLite-backed trusted
+device records, signature-based authentication, and revocation. Do not
+describe the project as providing task authorization, replay prevention,
+networking, or audit logging until those phases are implemented. Never treat
+device discovery or request-supplied key material as proof of trust.
