@@ -2,7 +2,10 @@
 
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::device_registry::{AuthenticatedRequest, DeviceRegistry, ReplayRecordError};
+use crate::{
+    database::SecurityEvent,
+    device_registry::{AuthenticatedRequest, DeviceRegistry, ReplayRecordError},
+};
 
 const DEFAULT_MAXIMUM_AGE: Duration = Duration::from_secs(5 * 60);
 const DEFAULT_CLOCK_SKEW: Duration = Duration::from_secs(30);
@@ -66,10 +69,18 @@ impl ReplayProtection {
 
         if timestamp > now_ms {
             if timestamp - now_ms > self.allowed_clock_skew_ms {
-                return Err(ReplayRejectionReason::FutureTimestamp);
+                return self.reject(
+                    registry,
+                    authenticated,
+                    ReplayRejectionReason::FutureTimestamp,
+                );
             }
         } else if now_ms - timestamp > self.maximum_age_ms {
-            return Err(ReplayRejectionReason::ExpiredRequest);
+            return self.reject(
+                registry,
+                authenticated,
+                ReplayRejectionReason::ExpiredRequest,
+            );
         }
 
         // Keep a record until the request can no longer pass the age check.
@@ -77,17 +88,61 @@ impl ReplayProtection {
         // clock-skew window.
         let expires_at_ms = timestamp
             .checked_add(self.maximum_age_ms)
-            .ok_or(ReplayRejectionReason::InvalidTimestamp)?;
+            .ok_or(ReplayRejectionReason::InvalidTimestamp);
+        let expires_at_ms = match expires_at_ms {
+            Ok(expires_at_ms) => expires_at_ms,
+            Err(reason) => return self.reject(registry, authenticated, reason),
+        };
 
+        match registry.record_fresh_request(
+            request.device_id,
+            request.request_id,
+            &request.nonce,
+            &request.task_id,
+            now_ms,
+            expires_at_ms,
+        ) {
+            Ok(()) => Ok(()),
+            Err(error) => self.reject(registry, authenticated, map_record_error(error)),
+        }
+    }
+
+    fn reject(
+        &self,
+        registry: &DeviceRegistry,
+        authenticated: &AuthenticatedRequest,
+        reason: ReplayRejectionReason,
+    ) -> Result<(), ReplayRejectionReason> {
+        let request = authenticated.request();
+        let task_id = crate::authorization::TASKS
+            .iter()
+            .find(|task| task.task_id == request.task_id)
+            .map(|task| task.task_id);
         registry
-            .record_fresh_request(
-                request.device_id,
-                request.request_id,
-                &request.nonce,
-                now_ms,
-                expires_at_ms,
-            )
-            .map_err(map_record_error)
+            .record_security_event(&SecurityEvent {
+                category: "replay_protection",
+                accepted: false,
+                device_id: Some(request.device_id),
+                request_id: Some(request.request_id),
+                task_id,
+                reason: Some(replay_audit_reason(reason)),
+            })
+            .map_err(|_| ReplayRejectionReason::StorageUnavailable)?;
+        Err(reason)
+    }
+}
+
+fn replay_audit_reason(reason: ReplayRejectionReason) -> &'static str {
+    match reason {
+        ReplayRejectionReason::ExpiredRequest => "request expired",
+        ReplayRejectionReason::FutureTimestamp => "timestamp outside clock-skew window",
+        ReplayRejectionReason::InvalidTimestamp => "invalid timestamp",
+        ReplayRejectionReason::RepeatedRequestId => "request ID already used",
+        ReplayRejectionReason::ReusedNonce => "nonce already used",
+        ReplayRejectionReason::UnknownDevice => "unknown device",
+        ReplayRejectionReason::RevokedDevice => "revoked device",
+        ReplayRejectionReason::ClockUnavailable => "system clock unavailable",
+        ReplayRejectionReason::StorageUnavailable => "replay storage unavailable",
     }
 }
 

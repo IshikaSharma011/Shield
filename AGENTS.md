@@ -20,5 +20,7 @@ Phase 3 adds fingerprint-checked manual enrollment, SQLite-backed trusted
 device records, signature-based authentication, and revocation. Phase 4 adds
 predefined task authorization with explicit per-device grants and parameter
 allow-lists; authorization returns a decision and does not execute tasks.
-Replay prevention, networking, and audit logging are not implemented yet.
+Phase 5 adds timestamp validation and SQLite-backed replay prevention. Phase 6
+adds versioned SQLite migrations and privacy-conscious security decision logs.
+Networking is not implemented yet.
 Never treat device discovery or request-supplied key material as proof of trust.

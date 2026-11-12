@@ -83,6 +83,21 @@ clock that moves backward or forward can cause valid requests to be denied or
 affect expiry decisions. This phase still has no network protocol or
 server-issued challenge.
 
+## Phase 6: persistent SQLite storage
+
+`src/database.rs` owns SQLite initialization, schema versioning, migrations,
+and privacy-conscious security log access. The registry, task permissions,
+and replay table use this shared database. Existing Phase 5 permission and
+replay rows are copied into the current table names by the first migration;
+legacy tables are left in place. Security-sensitive changes write their audit
+event in the same transaction when the operation changes persistent state.
+
+The audit log stores event category, accepted or rejected outcome, time,
+optional device/request/task identifiers, and a fixed reason. It never stores
+signatures, private keys, nonces, or request parameters. The log has no
+automatic retention policy and grows until an operator applies a retention
+policy or rotates the database.
+
 ## Intended objectives
 
 Future work may include SQLite audit logging and integration interfaces.

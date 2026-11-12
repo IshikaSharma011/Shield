@@ -4,8 +4,9 @@ use std::{collections::BTreeMap, fmt};
 
 use uuid::Uuid;
 
-use crate::device_registry::{
-    AuthenticatedRequest, DeviceRegistry, RegistryError, TaskPermissionStatus,
+use crate::{
+    database::SecurityEvent,
+    device_registry::{AuthenticatedRequest, DeviceRegistry, RegistryError, TaskPermissionStatus},
 };
 
 /// Parameter constraints for one predefined task.
@@ -68,6 +69,7 @@ pub enum RejectionReason {
     UnexpectedParameter,
     InvalidParameterValue(&'static str),
     RegistryUnavailable,
+    AuditUnavailable,
 }
 
 /// The authorization outcome for a signed and authenticated task request.
@@ -104,6 +106,16 @@ impl AuthorizationEngine {
         task_id: &str,
     ) -> Result<bool, AuthorizationError> {
         if find_task(task_id).is_none() {
+            registry
+                .record_security_event(&SecurityEvent {
+                    category: "permission_grant",
+                    accepted: false,
+                    device_id: Some(device_id),
+                    request_id: None,
+                    task_id: None,
+                    reason: Some("unknown task"),
+                })
+                .map_err(AuthorizationError::Registry)?;
             return Err(AuthorizationError::UnknownTask);
         }
         registry
@@ -120,6 +132,16 @@ impl AuthorizationEngine {
         task_id: &str,
     ) -> Result<bool, AuthorizationError> {
         if find_task(task_id).is_none() {
+            registry
+                .record_security_event(&SecurityEvent {
+                    category: "permission_revocation",
+                    accepted: false,
+                    device_id: Some(device_id),
+                    request_id: None,
+                    task_id: None,
+                    reason: Some("unknown task"),
+                })
+                .map_err(AuthorizationError::Registry)?;
             return Err(AuthorizationError::UnknownTask);
         }
         registry
@@ -135,7 +157,7 @@ impl AuthorizationEngine {
         authenticated: &AuthenticatedRequest,
     ) -> AuthorizationResult {
         let request = authenticated.request();
-        let decision = if let Some(task) = find_task(&request.task_id) {
+        let mut decision = if let Some(task) = find_task(&request.task_id) {
             match registry.task_permission_status(request.device_id, task.task_id) {
                 Ok(TaskPermissionStatus::UnknownDevice) => {
                     AuthorizationDecision::Denied(RejectionReason::UnknownDevice)
@@ -158,12 +180,51 @@ impl AuthorizationEngine {
             AuthorizationDecision::Denied(RejectionReason::UnknownTask)
         };
 
+        let accepted = decision == AuthorizationDecision::Allowed;
+        let reason = match &decision {
+            AuthorizationDecision::Allowed => None,
+            AuthorizationDecision::Denied(reason) => Some(audit_reason(reason)),
+        };
+        let known_device = registry
+            .get(request.device_id)
+            .ok()
+            .flatten()
+            .map(|device| device.device_id);
+        let known_task = find_task(&request.task_id).map(|task| task.task_id);
+        if registry
+            .record_security_event(&SecurityEvent {
+                category: "authorization",
+                accepted,
+                device_id: known_device,
+                request_id: Some(request.request_id),
+                task_id: known_task,
+                reason,
+            })
+            .is_err()
+        {
+            decision = AuthorizationDecision::Denied(RejectionReason::AuditUnavailable);
+        }
+
         AuthorizationResult {
             request_id: request.request_id,
             device_id: request.device_id,
             task_id: request.task_id.clone(),
             decision,
         }
+    }
+}
+
+fn audit_reason(reason: &RejectionReason) -> &'static str {
+    match reason {
+        RejectionReason::UnknownTask => "unknown task",
+        RejectionReason::UnknownDevice => "unknown device",
+        RejectionReason::RevokedDevice => "revoked device",
+        RejectionReason::TaskNotGranted => "task permission missing",
+        RejectionReason::MissingParameter(_) => "required parameter missing",
+        RejectionReason::UnexpectedParameter => "unexpected parameter",
+        RejectionReason::InvalidParameterValue(_) => "parameter value not allowed",
+        RejectionReason::RegistryUnavailable => "registry unavailable",
+        RejectionReason::AuditUnavailable => "audit storage unavailable",
     }
 }
 

@@ -3,7 +3,7 @@
 Shield is a standalone cybersecurity framework being developed in Rust for
 the DaemonONE distributed operating environment.
 
-## Current status: Phase 5
+## Current status: Phase 6
 
 Shield creates a device identity with a random UUID and Ed25519 key pair. It
 stores the private key in the operating system's credential store and displays
@@ -17,18 +17,19 @@ explicit per-device task grants, and strict parameter validation. Authorization
 returns a decision only; this demonstration does not execute tasks or commands.
 Phase 5 adds configurable timestamp validation and SQLite-backed replay
 prevention scoped to each authenticated device. This project still does not
-communicate over a network or write security audit logs. Do not use this phase
-as a production security system.
+communicate over a network. Phase 6 adds versioned SQLite migrations and
+privacy-conscious security decision logs. Do not use this phase as a production
+security system.
 
 ## Planned objectives
 
-- Record security decisions in SQLite without logging private key material.
 - Provide an interactive terminal demonstration and integration-ready
   interfaces.
 
 Device identity creation, signed requests, trusted-device enrollment,
 authentication, revocation, allow-list authorization, and replay prevention
-are implemented. Networking and security audit logging remain planned work.
+and SQLite security decision logging are implemented. Networking remains
+planned work.
 
 ## Requirements
 
@@ -61,6 +62,7 @@ cargo run -- registry revoke-task --database shield-registry.sqlite3 --device-id
 - `docs/device-registry.md`: enrollment, authentication, and revocation.
 - `docs/authorization.md`: predefined tasks, grants, and parameter rules.
 - `docs/replay-protection.md`: freshness policy, atomic replay checks, and limits.
+- `docs/database.md`: tables, migrations, backups, and log retention.
 - `docs/architecture.md`: architecture and phase boundaries.
 - `docs/threat-model.md`: current security scope and limitations.
 
@@ -70,8 +72,8 @@ Clap parses command-line arguments. `uuid` creates random device IDs,
 `ed25519-dalek` creates and verifies Ed25519 signatures, and `rand_core`
 supplies the operating-system random source. `uuid` represents device and
 request IDs. `keyring` accesses native OS credential stores. `rusqlite` stores
-public registry records, task grants, and replay records, and `sha2` computes
-enrollment fingerprints.
+public registry records, task grants, replay records, and audit events, and
+`sha2` computes enrollment fingerprints.
 `zeroize` clears temporary private-key buffers where practical. Error handling
 uses Rust's standard library.
 

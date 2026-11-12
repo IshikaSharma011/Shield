@@ -9,7 +9,7 @@
   holder for a known, non-revoked registry entry. Shield uses the key stored
   for that device ID; the request cannot supply its own trusted key.
 - **Authorization** decides whether that authenticated device may perform a
-  particular task. Task authorization is not implemented in this phase.
+particular task, as implemented in Phase 4.
 
 Finding or discovering a device is not enrollment and does not make it
 trusted.
@@ -78,6 +78,7 @@ public data, but its integrity still matters: a user who can alter it could
 change the trust decisions. Protect the database file with appropriate OS
 account permissions and keep backups under the same access controls.
 
-This phase does not authorize tasks, reject expired or replayed requests,
-discover devices, or transmit registry changes to other devices. Operators
-must distribute enrollment fingerprints and revocation decisions manually.
+The current registry also stores per-device task grants, replay records, and
+security decisions. It does not discover devices or transmit registry changes
+to other devices. Operators must distribute enrollment fingerprints and
+revocation decisions manually.

@@ -7,32 +7,14 @@ use std::{
 };
 
 use ed25519_dalek::VerifyingKey;
-use rusqlite::{params, Connection, ErrorCode, OptionalExtension};
+use rusqlite::{params, ErrorCode, OptionalExtension};
 use sha2::{Digest, Sha256};
 use uuid::Uuid;
 
-use crate::signature::{SignatureError, SignedRequest, TaskRequest};
-
-const REGISTRY_SCHEMA: &str = "CREATE TABLE IF NOT EXISTS trusted_devices (
-    device_id TEXT PRIMARY KEY NOT NULL,
-    public_key BLOB NOT NULL UNIQUE CHECK (length(public_key) = 32),
-    name TEXT NOT NULL CHECK (length(name) BETWEEN 1 AND 128),
-    registered_at INTEGER NOT NULL CHECK (registered_at >= 0),
-    status TEXT NOT NULL CHECK (status IN ('trusted', 'revoked'))
-);
-CREATE TABLE IF NOT EXISTS device_task_permissions (
-    device_id TEXT NOT NULL REFERENCES trusted_devices(device_id) ON DELETE CASCADE,
-    task_id TEXT NOT NULL,
-    PRIMARY KEY (device_id, task_id)
-);
-CREATE TABLE IF NOT EXISTS replay_requests (
-    device_id TEXT NOT NULL REFERENCES trusted_devices(device_id) ON DELETE CASCADE,
-    request_id TEXT NOT NULL,
-    nonce BLOB NOT NULL CHECK (length(nonce) = 32),
-    expires_at INTEGER NOT NULL CHECK (expires_at >= 0),
-    PRIMARY KEY (device_id, request_id),
-    UNIQUE (device_id, nonce)
-);";
+use crate::{
+    database::{insert_security_event, Database, DatabaseError, SecurityEvent},
+    signature::{SignatureError, SignedRequest, TaskRequest},
+};
 
 /// Current trust state for a manually enrolled device.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -80,7 +62,7 @@ pub struct RegisteredDevice {
 
 /// A SQLite-backed collection of manually trusted devices.
 pub struct DeviceRegistry {
-    connection: Connection,
+    database: Database,
 }
 
 /// A request that has passed registry lookup and signature verification.
@@ -111,15 +93,17 @@ pub(crate) enum TaskPermissionStatus {
 impl DeviceRegistry {
     /// Opens or creates a registry database at `path`.
     pub fn open(path: impl AsRef<Path>) -> Result<Self, RegistryError> {
-        let connection = Connection::open(path).map_err(map_database_error)?;
-        Self::from_connection(connection)
+        Database::open(path)
+            .map(|database| Self { database })
+            .map_err(map_storage_error)
     }
 
     /// Opens a temporary in-memory registry, primarily useful for tests and
     /// short-lived demonstrations.
     pub fn open_in_memory() -> Result<Self, RegistryError> {
-        let connection = Connection::open_in_memory().map_err(map_database_error)?;
-        Self::from_connection(connection)
+        Database::open_in_memory()
+            .map(|database| Self { database })
+            .map_err(map_storage_error)
     }
 
     /// Manually enrolls a device after comparing the supplied fingerprint
@@ -133,12 +117,38 @@ impl DeviceRegistry {
     ) -> Result<RegisteredDevice, RegistryError> {
         let name = name.trim();
         if name.is_empty() || name.len() > 128 {
+            self.record_security_event(&SecurityEvent {
+                category: "device_enrollment",
+                accepted: false,
+                device_id: Some(device_id),
+                request_id: None,
+                task_id: None,
+                reason: Some("invalid device name"),
+            })?;
             return Err(RegistryError::InvalidName);
         }
-        VerifyingKey::from_bytes(&public_key).map_err(|_| RegistryError::InvalidPublicKey)?;
+        if VerifyingKey::from_bytes(&public_key).is_err() {
+            self.record_security_event(&SecurityEvent {
+                category: "device_enrollment",
+                accepted: false,
+                device_id: Some(device_id),
+                request_id: None,
+                task_id: None,
+                reason: Some("invalid public key"),
+            })?;
+            return Err(RegistryError::InvalidPublicKey);
+        }
 
         let fingerprint = public_key_fingerprint(&public_key);
         if !fingerprint.eq_ignore_ascii_case(confirmed_fingerprint) {
+            self.record_security_event(&SecurityEvent {
+                category: "device_enrollment",
+                accepted: false,
+                device_id: Some(device_id),
+                request_id: None,
+                task_id: None,
+                reason: Some("fingerprint mismatch"),
+            })?;
             return Err(RegistryError::FingerprintMismatch);
         }
 
@@ -151,7 +161,12 @@ impl DeviceRegistry {
         let registered_at_db =
             i64::try_from(registered_at).map_err(|_| RegistryError::ClockUnavailable)?;
 
-        self.connection
+        let transaction = self
+            .database
+            .connection
+            .unchecked_transaction()
+            .map_err(map_database_error)?;
+        transaction
             .execute(
                 "INSERT INTO trusted_devices
                     (device_id, public_key, name, registered_at, status)
@@ -165,6 +180,19 @@ impl DeviceRegistry {
                 ],
             )
             .map_err(map_database_error)?;
+        insert_security_event(
+            &transaction,
+            &SecurityEvent {
+                category: "device_enrollment",
+                accepted: true,
+                device_id: Some(device_id),
+                request_id: None,
+                task_id: None,
+                reason: None,
+            },
+        )
+        .map_err(map_storage_error)?;
+        transaction.commit().map_err(map_database_error)?;
 
         Ok(RegisteredDevice {
             device_id,
@@ -178,6 +206,7 @@ impl DeviceRegistry {
     /// Returns the record for a device ID, or `None` if it is not registered.
     pub fn get(&self, device_id: Uuid) -> Result<Option<RegisteredDevice>, RegistryError> {
         let row = self
+            .database
             .connection
             .query_row(
                 "SELECT device_id, public_key, name, registered_at, status
@@ -193,6 +222,7 @@ impl DeviceRegistry {
     /// Returns all records, ordered by their device ID.
     pub fn list(&self) -> Result<Vec<RegisteredDevice>, RegistryError> {
         let mut statement = self
+            .database
             .connection
             .prepare(
                 "SELECT device_id, public_key, name, registered_at, status
@@ -209,12 +239,24 @@ impl DeviceRegistry {
         .collect()
     }
 
+    /// Returns the explicitly assigned task IDs for one registered device.
+    pub fn permissions(&self, device_id: Uuid) -> Result<Vec<String>, RegistryError> {
+        self.database
+            .device_permissions(device_id)
+            .map_err(map_storage_error)
+    }
+
     /// Marks an enrolled device as revoked. Repeating the operation is safe
     /// and returns the already-revoked record.
     pub fn revoke(&self, device_id: Uuid) -> Result<RegisteredDevice, RegistryError> {
         let mut device = self.get(device_id)?.ok_or(RegistryError::UnknownDevice)?;
+        let transaction = self
+            .database
+            .connection
+            .unchecked_transaction()
+            .map_err(map_database_error)?;
         if device.status == DeviceStatus::Trusted {
-            self.connection
+            transaction
                 .execute(
                     "UPDATE trusted_devices SET status = ?1 WHERE device_id = ?2",
                     params![DeviceStatus::Revoked.as_str(), device_id.to_string()],
@@ -222,6 +264,19 @@ impl DeviceRegistry {
                 .map_err(map_database_error)?;
             device.status = DeviceStatus::Revoked;
         }
+        insert_security_event(
+            &transaction,
+            &SecurityEvent {
+                category: "device_revocation",
+                accepted: true,
+                device_id: Some(device_id),
+                request_id: None,
+                task_id: None,
+                reason: None,
+            },
+        )
+        .map_err(map_storage_error)?;
+        transaction.commit().map_err(map_database_error)?;
         Ok(device)
     }
 
@@ -243,6 +298,39 @@ impl DeviceRegistry {
         &self,
         signed_request: &SignedRequest,
     ) -> Result<AuthenticatedRequest, RegistryError> {
+        let parsed = TaskRequest::deserialize(signed_request.request_bytes()).ok();
+        let result = self.authenticate_request_inner(signed_request);
+        let authenticated = result.is_ok();
+        let device_id = result
+            .as_ref()
+            .map(|request| request.device_id())
+            .ok()
+            .or_else(|| {
+                parsed
+                    .as_ref()
+                    .and_then(|request| self.get(request.device_id).ok().flatten())
+                    .map(|device| device.device_id)
+            });
+        let request_id = parsed.as_ref().map(|request| request.request_id);
+        let task_id = parsed
+            .as_ref()
+            .and_then(|request| approved_task_id(&request.task_id));
+        let reason = result.as_ref().err().map(registry_audit_reason);
+        self.record_security_event(&SecurityEvent {
+            category: "authentication",
+            accepted: authenticated,
+            device_id,
+            request_id,
+            task_id,
+            reason,
+        })?;
+        result
+    }
+
+    fn authenticate_request_inner(
+        &self,
+        signed_request: &SignedRequest,
+    ) -> Result<AuthenticatedRequest, RegistryError> {
         let untrusted_request = TaskRequest::deserialize(signed_request.request_bytes())
             .map_err(RegistryError::RequestVerification)?;
         let device = self
@@ -260,24 +348,93 @@ impl DeviceRegistry {
         Ok(AuthenticatedRequest { request })
     }
 
+    pub(crate) fn record_security_event(
+        &self,
+        event: &SecurityEvent<'_>,
+    ) -> Result<(), RegistryError> {
+        self.database
+            .record_security_event(event)
+            .map_err(|_| RegistryError::AuditUnavailable)
+    }
+
     pub(crate) fn grant_task_permission(
         &self,
         device_id: Uuid,
         task_id: &str,
     ) -> Result<bool, RegistryError> {
-        let device = self.get(device_id)?.ok_or(RegistryError::UnknownDevice)?;
-        if device.status == DeviceStatus::Revoked {
-            return Err(RegistryError::RevokedDevice);
+        let transaction = self
+            .database
+            .connection
+            .unchecked_transaction()
+            .map_err(map_database_error)?;
+        let status = transaction
+            .query_row(
+                "SELECT status FROM trusted_devices WHERE device_id = ?1",
+                [device_id.to_string()],
+                |row| row.get::<_, String>(0),
+            )
+            .optional()
+            .map_err(map_database_error)?;
+        match status.as_deref() {
+            Some("trusted") => {}
+            Some("revoked") => {
+                insert_security_event(
+                    &transaction,
+                    &SecurityEvent {
+                        category: "permission_grant",
+                        accepted: false,
+                        device_id: Some(device_id),
+                        request_id: None,
+                        task_id: approved_task_id(task_id),
+                        reason: Some("device revoked"),
+                    },
+                )
+                .map_err(map_storage_error)?;
+                transaction.commit().map_err(map_database_error)?;
+                return Err(RegistryError::RevokedDevice);
+            }
+            _ => {
+                insert_security_event(
+                    &transaction,
+                    &SecurityEvent {
+                        category: "permission_grant",
+                        accepted: false,
+                        device_id: Some(device_id),
+                        request_id: None,
+                        task_id: approved_task_id(task_id),
+                        reason: Some("unknown device"),
+                    },
+                )
+                .map_err(map_storage_error)?;
+                transaction.commit().map_err(map_database_error)?;
+                return Err(RegistryError::UnknownDevice);
+            }
         }
 
-        let changed = self
-            .connection
+        let changed = transaction
             .execute(
-                "INSERT OR IGNORE INTO device_task_permissions (device_id, task_id)
+                "INSERT OR IGNORE INTO device_permissions (device_id, task_id)
                  VALUES (?1, ?2)",
                 params![device_id.to_string(), task_id],
             )
             .map_err(map_database_error)?;
+        insert_security_event(
+            &transaction,
+            &SecurityEvent {
+                category: "permission_grant",
+                accepted: true,
+                device_id: Some(device_id),
+                request_id: None,
+                task_id: Some(task_id),
+                reason: if changed == 0 {
+                    Some("permission already existed")
+                } else {
+                    None
+                },
+            },
+        )
+        .map_err(map_storage_error)?;
+        transaction.commit().map_err(map_database_error)?;
         Ok(changed > 0)
     }
 
@@ -286,13 +443,41 @@ impl DeviceRegistry {
         device_id: Uuid,
         task_id: &str,
     ) -> Result<bool, RegistryError> {
-        let changed = self
+        let transaction = self
+            .database
             .connection
+            .unchecked_transaction()
+            .map_err(map_database_error)?;
+        let changed = transaction
             .execute(
-                "DELETE FROM device_task_permissions WHERE device_id = ?1 AND task_id = ?2",
+                "DELETE FROM device_permissions WHERE device_id = ?1 AND task_id = ?2",
                 params![device_id.to_string(), task_id],
             )
             .map_err(map_database_error)?;
+        let known_device = transaction
+            .query_row(
+                "SELECT EXISTS (SELECT 1 FROM trusted_devices WHERE device_id = ?1)",
+                [device_id.to_string()],
+                |row| row.get::<_, bool>(0),
+            )
+            .map_err(map_database_error)?;
+        insert_security_event(
+            &transaction,
+            &SecurityEvent {
+                category: "permission_revocation",
+                accepted: true,
+                device_id: known_device.then_some(device_id),
+                request_id: None,
+                task_id: Some(task_id),
+                reason: if changed == 0 {
+                    Some("permission did not exist")
+                } else {
+                    None
+                },
+            },
+        )
+        .map_err(map_storage_error)?;
+        transaction.commit().map_err(map_database_error)?;
         Ok(changed > 0)
     }
 
@@ -302,10 +487,11 @@ impl DeviceRegistry {
         task_id: &str,
     ) -> Result<TaskPermissionStatus, RegistryError> {
         let row = self
+            .database
             .connection
             .query_row(
                 "SELECT status, EXISTS (
-                    SELECT 1 FROM device_task_permissions
+                    SELECT 1 FROM device_permissions
                     WHERE device_id = trusted_devices.device_id AND task_id = ?2
                  )
                  FROM trusted_devices WHERE device_id = ?1",
@@ -335,13 +521,15 @@ impl DeviceRegistry {
         device_id: Uuid,
         request_id: Uuid,
         nonce: &[u8; 32],
+        task_id: &str,
         now_ms: u64,
         expires_at_ms: u64,
     ) -> Result<(), ReplayRecordError> {
         let now_db = i64::try_from(now_ms).map_err(|_| ReplayRecordError::StorageUnavailable)?;
         let expiry_db =
             i64::try_from(expires_at_ms).map_err(|_| ReplayRecordError::StorageUnavailable)?;
-        self.connection
+        self.database
+            .connection
             .execute_batch("BEGIN IMMEDIATE")
             .map_err(|_| ReplayRecordError::StorageUnavailable)?;
 
@@ -350,6 +538,7 @@ impl DeviceRegistry {
         // the explicit transaction scoped here and always commit or roll back.
         let result = (|| {
             let status = self
+                .database
                 .connection
                 .query_row(
                     "SELECT status FROM trusted_devices WHERE device_id = ?1",
@@ -364,19 +553,18 @@ impl DeviceRegistry {
                 _ => return Err(ReplayRecordError::UnknownDevice),
             }
 
-            self.connection
-                .execute(
-                    "DELETE FROM replay_requests WHERE expires_at < ?1",
-                    [now_db],
-                )
+            self.database
+                .connection
+                .execute("DELETE FROM used_nonces WHERE expires_at < ?1", [now_db])
                 .map_err(|_| ReplayRecordError::StorageUnavailable)?;
 
             let device_id_text = device_id.to_string();
             let request_id_text = request_id.to_string();
             let request_seen = self
+                .database
                 .connection
                 .query_row(
-                    "SELECT EXISTS (SELECT 1 FROM replay_requests
+                    "SELECT EXISTS (SELECT 1 FROM used_nonces
                      WHERE device_id = ?1 AND request_id = ?2)",
                     params![device_id_text, request_id_text],
                     |row| row.get::<_, bool>(0),
@@ -387,9 +575,10 @@ impl DeviceRegistry {
             }
 
             let nonce_seen = self
+                .database
                 .connection
                 .query_row(
-                    "SELECT EXISTS (SELECT 1 FROM replay_requests
+                    "SELECT EXISTS (SELECT 1 FROM used_nonces
                      WHERE device_id = ?1 AND nonce = ?2)",
                     params![device_id_text, nonce.as_slice()],
                     |row| row.get::<_, bool>(0),
@@ -399,42 +588,42 @@ impl DeviceRegistry {
                 return Err(ReplayRecordError::ReusedNonce);
             }
 
-            self.connection
+            self.database
+                .connection
                 .execute(
-                    "INSERT INTO replay_requests (device_id, request_id, nonce, expires_at)
+                    "INSERT INTO used_nonces (device_id, request_id, nonce, expires_at)
                      VALUES (?1, ?2, ?3, ?4)",
                     params![device_id_text, request_id_text, nonce.as_slice(), expiry_db],
                 )
                 .map_err(|_| ReplayRecordError::StorageUnavailable)?;
+            insert_security_event(
+                &self.database.connection,
+                &SecurityEvent {
+                    category: "replay_protection",
+                    accepted: true,
+                    device_id: Some(device_id),
+                    request_id: Some(request_id),
+                    task_id: approved_task_id(task_id),
+                    reason: None,
+                },
+            )
+            .map_err(|_| ReplayRecordError::StorageUnavailable)?;
             Ok(())
         })();
 
         match result {
-            Ok(()) => match self.connection.execute_batch("COMMIT") {
+            Ok(()) => match self.database.connection.execute_batch("COMMIT") {
                 Ok(()) => Ok(()),
                 Err(_) => {
-                    let _ = self.connection.execute_batch("ROLLBACK");
+                    let _ = self.database.connection.execute_batch("ROLLBACK");
                     Err(ReplayRecordError::StorageUnavailable)
                 }
             },
             Err(error) => {
-                let _ = self.connection.execute_batch("ROLLBACK");
+                let _ = self.database.connection.execute_batch("ROLLBACK");
                 Err(error)
             }
         }
-    }
-
-    fn from_connection(connection: Connection) -> Result<Self, RegistryError> {
-        connection
-            .busy_timeout(std::time::Duration::from_secs(5))
-            .map_err(map_database_error)?;
-        connection
-            .execute_batch("PRAGMA foreign_keys = ON;")
-            .map_err(map_database_error)?;
-        connection
-            .execute_batch(REGISTRY_SCHEMA)
-            .map_err(map_database_error)?;
-        Ok(Self { connection })
     }
 }
 
@@ -514,6 +703,40 @@ fn map_database_error(error: rusqlite::Error) -> RegistryError {
     }
 }
 
+fn map_storage_error(error: DatabaseError) -> RegistryError {
+    match error {
+        DatabaseError::ClockUnavailable => RegistryError::ClockUnavailable,
+        DatabaseError::CorruptDatabase | DatabaseError::UnsupportedSchemaVersion(_) => {
+            RegistryError::CorruptRecord
+        }
+        DatabaseError::StorageUnavailable => RegistryError::StorageUnavailable,
+    }
+}
+
+fn approved_task_id(task_id: &str) -> Option<&'static str> {
+    crate::authorization::TASKS
+        .iter()
+        .find(|task| task.task_id == task_id)
+        .map(|task| task.task_id)
+}
+
+fn registry_audit_reason(error: &RegistryError) -> &'static str {
+    match error {
+        RegistryError::StorageUnavailable | RegistryError::AuditUnavailable => {
+            "registry storage unavailable"
+        }
+        RegistryError::CorruptRecord => "registry record invalid",
+        RegistryError::InvalidName => "invalid device name",
+        RegistryError::InvalidPublicKey => "invalid public key",
+        RegistryError::FingerprintMismatch => "fingerprint mismatch",
+        RegistryError::DuplicateIdentity => "duplicate device identity",
+        RegistryError::UnknownDevice => "unknown device",
+        RegistryError::RevokedDevice => "revoked device",
+        RegistryError::RequestVerification(_) => "request signature verification failed",
+        RegistryError::ClockUnavailable => "system clock unavailable",
+    }
+}
+
 fn encode_hex(bytes: &[u8]) -> String {
     const HEX: &[u8; 16] = b"0123456789abcdef";
     let mut encoded = String::with_capacity(bytes.len() * 2);
@@ -547,6 +770,7 @@ pub enum RegistryError {
     RevokedDevice,
     RequestVerification(SignatureError),
     ClockUnavailable,
+    AuditUnavailable,
 }
 
 impl fmt::Display for RegistryError {
@@ -573,6 +797,9 @@ impl fmt::Display for RegistryError {
             Self::RequestVerification(error) => write!(formatter, "{error}"),
             Self::ClockUnavailable => {
                 formatter.write_str("The system clock could not provide a valid registration time.")
+            }
+            Self::AuditUnavailable => {
+                formatter.write_str("The security decision could not be stored in the audit log.")
             }
         }
     }
@@ -729,6 +956,9 @@ mod tests {
             let registry = DeviceRegistry::open(&path).expect("open file-backed registry");
             enroll(&registry, &identity);
             registry
+                .grant_task_permission(identity.device_id(), "registry.list")
+                .expect("persist permission");
+            registry
                 .revoke(identity.device_id())
                 .expect("revoke device");
         }
@@ -739,8 +969,45 @@ mod tests {
             .expect("query device")
             .expect("record persists");
         assert_eq!(saved.status, DeviceStatus::Revoked);
+        assert_eq!(
+            registry
+                .permissions(identity.device_id())
+                .expect("read persisted permission"),
+            vec!["registry.list"]
+        );
         drop(registry);
         std::fs::remove_file(path).expect("remove temporary test database");
+    }
+
+    #[test]
+    fn failed_audit_write_rolls_back_device_enrollment() {
+        let registry = DeviceRegistry::open_in_memory().expect("open test registry");
+        let identity = new_identity();
+        registry
+            .database
+            .connection
+            .execute_batch(
+                "CREATE TRIGGER reject_audit_insert BEFORE INSERT ON security_logs
+                 BEGIN SELECT RAISE(ABORT, 'forced test failure'); END;",
+            )
+            .expect("install test failure trigger");
+        let public_key = identity.public_key_bytes();
+
+        assert_eq!(
+            registry.enroll(
+                identity.device_id(),
+                public_key,
+                "transaction test",
+                &public_key_fingerprint(&public_key),
+            ),
+            Err(RegistryError::StorageUnavailable)
+        );
+        assert_eq!(
+            registry
+                .get(identity.device_id())
+                .expect("query rolled back record"),
+            None
+        );
     }
 
     #[test]
