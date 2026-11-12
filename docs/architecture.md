@@ -98,15 +98,29 @@ signatures, private keys, nonces, or request parameters. The log has no
 automatic retention policy and grows until an operator applies a retention
 policy or rotates the database.
 
+## Phase 7: integrated security engine
+
+`src/security_engine.rs` composes the existing identity, signature,
+authentication, replay, authorization, and SQLite audit interfaces into one
+ordered request pipeline. It authenticates a signed request once, checks and
+records replay state once, authorizes once, then records the final pipeline
+outcome. Accepted requests return a simulated approval result. No task or
+operating-system command is executed, and no network interface is added.
+
+The sender can use `SecurityEngine::create_signed_request` with a
+`DeviceIdentity`; it relies on the Phase 2 canonical request format and
+signature implementation. Existing lower-level APIs remain available.
+
 ## Intended objectives
 
-Future work may include SQLite audit logging and integration interfaces.
+Future work may include networking and integration interfaces.
 
 ## Scope boundary
 
 Authentication checks that a trusted, non-revoked record's public key signed
 the request. Authorization is a separate decision based on task allow-list,
 device grant, and parameter schema.
-Requests are checked for age and prior use in the local registry. There is no
-network communication, audit logging, or system-command execution. The project
-is an academic demonstration, not a security certification.
+Requests pass through authentication, replay checks, and authorization before
+the engine returns a simulated result. There is no network communication or
+system-command execution. The project is an academic demonstration, not a
+security certification.

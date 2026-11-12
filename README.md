@@ -3,7 +3,7 @@
 Shield is a standalone cybersecurity framework being developed in Rust for
 the DaemonONE distributed operating environment.
 
-## Current status: Phase 6
+## Current status: Phase 7
 
 Shield creates a device identity with a random UUID and Ed25519 key pair. It
 stores the private key in the operating system's credential store and displays
@@ -18,8 +18,10 @@ returns a decision only; this demonstration does not execute tasks or commands.
 Phase 5 adds configurable timestamp validation and SQLite-backed replay
 prevention scoped to each authenticated device. This project still does not
 communicate over a network. Phase 6 adds versioned SQLite migrations and
-privacy-conscious security decision logs. Do not use this phase as a production
-security system.
+privacy-conscious security decision logs. Phase 7 integrates authentication,
+replay prevention, and authorization into one ordered pipeline that returns a
+simulated approval without executing a task. Do not use this project as a
+production security system.
 
 ## Planned objectives
 
@@ -27,9 +29,9 @@ security system.
   interfaces.
 
 Device identity creation, signed requests, trusted-device enrollment,
-authentication, revocation, allow-list authorization, and replay prevention
-and SQLite security decision logging are implemented. Networking remains
-planned work.
+authentication, revocation, allow-list authorization, replay prevention,
+SQLite security decision logging, and the integrated request pipeline are
+implemented. Networking and task execution remain out of scope.
 
 ## Requirements
 
@@ -63,6 +65,7 @@ cargo run -- registry revoke-task --database shield-registry.sqlite3 --device-id
 - `docs/authorization.md`: predefined tasks, grants, and parameter rules.
 - `docs/replay-protection.md`: freshness policy, atomic replay checks, and limits.
 - `docs/database.md`: tables, migrations, backups, and log retention.
+- `docs/security-engine.md`: complete request-validation flow and result types.
 - `docs/architecture.md`: architecture and phase boundaries.
 - `docs/threat-model.md`: current security scope and limitations.
 

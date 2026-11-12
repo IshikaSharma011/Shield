@@ -2,12 +2,14 @@
 
 ## System in scope
 
-Phase 6 consists of a local Rust CLI and library. It creates device
+Phase 7 consists of a local Rust CLI and library. It creates device
 identities, serializes and signs requests, stores manually enrolled public-key
 records with trusted or revoked status in SQLite, and evaluates task requests
 against explicit per-device grants and predefined parameter schemas. It also
 checks authenticated requests for timestamp validity and records replay keys
-and security decisions in the migrated SQLite database.
+and security decisions in the migrated SQLite database. The integrated
+security engine composes authentication, replay checks, and authorization and
+returns a simulated approval or structured rejection.
 
 ## Security objectives
 
@@ -23,7 +25,8 @@ The signature detects request modification and proves possession of the
 private key corresponding to the supplied public key. This is not by itself
 trusted-device authentication or task authorization. Replay checks use local
 SQLite state and do not provide cross-machine protection. Network threats,
-unauthorized task execution, and audit-log tampering are not mitigated. A local attacker who can access an
+network threats, actual task execution, and audit-log tampering are not
+mitigated. A local attacker who can access an
 unlocked credential store may be able to retrieve the signing key.
 
 ## Assumptions and limitations

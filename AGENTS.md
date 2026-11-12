@@ -22,5 +22,6 @@ predefined task authorization with explicit per-device grants and parameter
 allow-lists; authorization returns a decision and does not execute tasks.
 Phase 5 adds timestamp validation and SQLite-backed replay prevention. Phase 6
 adds versioned SQLite migrations and privacy-conscious security decision logs.
-Networking is not implemented yet.
+Phase 7 composes the security checks into a single pipeline and returns a
+simulated result without running tasks. Networking is not implemented yet.
 Never treat device discovery or request-supplied key material as proof of trust.

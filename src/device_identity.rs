@@ -43,6 +43,13 @@ impl DeviceIdentity {
         Self::load_with_store(&store)
     }
 
+    /// Generates an identity in memory without saving it to the OS credential
+    /// store. This is useful for short-lived demonstrations and integration
+    /// tests; callers must arrange secure persistence separately if needed.
+    pub fn generate_ephemeral() -> Result<Self, ShieldError> {
+        Self::generate()
+    }
+
     /// Returns the random UUID assigned to this device.
     pub fn device_id(&self) -> Uuid {
         self.device_id
