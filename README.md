@@ -3,30 +3,31 @@
 Shield is a standalone cybersecurity framework being developed in Rust for
 the DaemonONE distributed operating environment.
 
-## Current status: Phase 1
+## Current status: Phase 2
 
 Shield creates a device identity with a random UUID and Ed25519 key pair. It
 stores the private key in the operating system's credential store and displays
 or exports only the public key. The CLI also prints a welcome message and
 supports `--help` and `--version`.
 
-Phase 1 does not authenticate trusted devices, authorize tasks, prevent replay
-attacks, communicate over a network, or write security audit logs. The OS
-credential store must be available; Shield does not fall back to a plaintext
-file. Do not use this phase as a production security system.
+Phase 2 can create and verify signed request messages, but it does not
+authenticate trusted devices, authorize tasks, reject replayed requests,
+communicate over a network, or write security audit logs. The caller must
+provide the public key already registered for the request's device ID. Do not
+use this phase as a production security system.
 
 ## Planned objectives
 
 - Enroll and revoke trusted devices.
-- Sign requests with Ed25519 and verify them against registered public keys.
 - Authorize tasks using explicit allow-lists.
 - Prevent replayed and expired requests.
 - Record security decisions in SQLite without logging private key material.
 - Provide an interactive terminal demonstration and integration-ready
   interfaces.
 
-The objectives above describe planned work. Device identity creation and
-public-key export are implemented; authentication and revocation are not.
+Device identity creation, public-key export, and request signing and
+verification are implemented. Trusted-device registration and authentication,
+authorization, replay prevention, and revocation are planned work.
 
 ## Requirements
 
@@ -49,16 +50,18 @@ cargo run -- identity export-public-key
 - `src/main.rs`: small command-line entry point.
 - `tests/`: integration tests.
 - `docs/device-identity.md`: identity generation, storage, and key lifecycle.
+- `docs/signature-format.md`: request serialization and signature verification.
 - `docs/architecture.md`: architecture and phase boundaries.
 - `docs/threat-model.md`: current security scope and limitations.
 
 ## Dependency
 
 Clap parses command-line arguments. `uuid` creates random device IDs,
-`ed25519-dalek` creates Ed25519 signing keys, and `rand_core` supplies the
-operating-system random source. `keyring` accesses native OS credential
-stores. `zeroize` clears temporary private-key buffers where practical. Error
-handling uses Rust's standard library.
+`ed25519-dalek` creates and verifies Ed25519 signatures, and `rand_core`
+supplies the operating-system random source. `uuid` represents device and
+request IDs. `keyring` accesses native OS credential stores. `zeroize` clears
+temporary private-key buffers where practical. Error handling uses Rust's
+standard library.
 
 ## Key lifecycle limitations
 

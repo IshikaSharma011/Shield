@@ -1,6 +1,7 @@
 pub mod config;
 pub mod device_identity;
 pub mod error;
+pub mod signature;
 
 /// Returns the welcome message shown by the command-line application.
 pub fn welcome_message() -> &'static str {

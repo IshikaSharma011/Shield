@@ -5,7 +5,7 @@
 
 use std::fmt;
 
-use ed25519_dalek::SigningKey;
+use ed25519_dalek::{Signer, SigningKey};
 use keyring::{Entry, Error as KeyringError};
 use rand_core::{OsRng, RngCore};
 use uuid::{Builder as UuidBuilder, Uuid};
@@ -59,6 +59,10 @@ impl DeviceIdentity {
         format!("ed25519:{}", encode_hex(&self.public_key_bytes()))
     }
 
+    pub(crate) fn sign_bytes(&self, message: &[u8]) -> [u8; 64] {
+        self.signing_key.sign(message).to_bytes()
+    }
+
     fn create_with_store(store: &impl CredentialStore) -> Result<Self, ShieldError> {
         let existing_secret = store.read_secret()?.map(Zeroizing::new);
         if existing_secret.is_some() {
@@ -80,7 +84,7 @@ impl DeviceIdentity {
         Self::decode_bundle(secret)
     }
 
-    fn generate() -> Result<Self, ShieldError> {
+    pub(crate) fn generate() -> Result<Self, ShieldError> {
         let mut random_bytes = Zeroizing::new([0_u8; 48]);
         OsRng.try_fill_bytes(&mut *random_bytes).map_err(|_| {
             ShieldError::new("The operating system random number generator failed.")

@@ -16,7 +16,8 @@
 - Add tests for security behavior as each security module is implemented.
 - Do not commit, push, merge, or reset without explicit approval.
 
-Phase 1 provides local device identity generation, OS credential-store
-persistence, identity display, and public-key export. Do not describe it as
-providing trusted-device authentication, task authorization, replay
-prevention, networking, or audit logging.
+Phase 2 adds deterministic signed task requests and public-key verification.
+The verifier must use the public key registered for the request's device ID.
+Do not describe the project as providing trusted-device registry,
+authorization, replay prevention, networking, or audit logging until those
+phases are implemented.
