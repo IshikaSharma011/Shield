@@ -1,137 +1,55 @@
 # Shield Architecture
 
-Shield is a standalone cybersecurity framework for the DaemonONE distributed
-operating environment. The project is organized as a Rust library with a
-command-line application for development and demonstration.
+Shield is a Rust library and command-line demonstration for the DaemonONE distributed operating environment. The library owns security decisions; `src/main.rs` parses CLI arguments and presents results. The code currently implements a local demonstration pipeline, not a distributed service.
 
-## Phase 0: project foundation
+## Component map
 
-The project starts as a Rust library with a small command-line application.
-Application behavior belongs in the library (`src/lib.rs` and its modules);
-`src/main.rs` is only the command-line entry point. The initial CLI displays a
-welcome message and supports the standard `--help` and `--version` options.
+| Component | Main responsibility | Persistent state |
+| --- | --- | --- |
+| `config` | Application name and welcome text. | None |
+| `device_identity` | Generate a random UUID and Ed25519 key pair, persist the identity in the OS credential store, and expose public information. | Private identity bundle in the OS credential store only. |
+| `signature` | Validate and serialize task requests in a versioned deterministic format; sign and verify the exact encoded bytes. | None |
+| `device_registry` | Manually enroll public keys after fingerprint comparison; look up trusted devices, revoke them, and manage task grants. | SQLite registry records and permissions. |
+| `authorization` | Apply the predefined task catalog, per-device grant, and parameter schema. | Reads and writes SQLite permissions. |
+| `replay_protection` | Enforce request time limits and atomically reserve device-scoped request IDs and nonces. | SQLite replay records. |
+| `database` | Initialize and migrate the schema, enforce constraints, run transactions, and store audit events. | SQLite database. |
+| `security_engine` | Call authentication, replay checks, authorization, and auditing in order; return typed results. | Uses the registry database. |
+| `demo_shell` | Collect menu input and display results by calling the engine and its existing interfaces. | In-memory SQLite for the process lifetime. |
 
-The command-line parser is Clap. The error module uses Rust's standard error
-traits.
+The CLI supports identity creation, display and public-key export; registry enrollment, listing, and revocation; task grant management; task-catalog display; and the interactive demo. The `--help` and `--version` flags are provided by Clap.
 
-## Phase 1: device identity
+## Request path
 
-`src/device_identity.rs` creates a random UUID and Ed25519 signing key. The
-private key and UUID are encoded into a small versioned bundle and persisted
-only through the OS credential store. A device identity can be loaded from
-that store. The library exposes the ID and a public-key enrollment string;
-its debug and display output do not reveal the private key.
+1. **Create:** `TaskRequest::new` creates a random request ID and nonce and captures a millisecond Unix timestamp. Callers provide a device ID, task ID, and parameter map.
+2. **Encode:** `TaskRequest::serialize` encodes a magic value, format version, IDs, timestamp, nonce, task, and sorted parameters. The parser rejects unsupported versions, invalid field encodings, oversized values, unsorted/duplicate keys, and trailing data.
+3. **Sign:** `sign_request` signs the exact serialized bytes with the local Ed25519 private key. The detached signature is stored separately from the request bytes.
+4. **Authenticate:** the registry uses the request device ID to look up a locally registered public key and status. It rejects unknown or revoked devices and verifies the exact bytes against that stored key. Request-supplied key material is not trusted.
+5. **Check freshness and replay:** `ReplayProtection` checks the timestamp against its maximum-age and clock-skew policy. A SQLite immediate transaction checks and inserts the device-scoped request ID and nonce, using uniqueness constraints to prevent concurrent duplicate reservations.
+6. **Authorize:** `AuthorizationEngine` checks that the task is in the fixed catalog, the device is currently trusted, a grant exists, and the parameter names and values satisfy that task's schema.
+7. **Audit and respond:** stage and pipeline decisions are written to `security_logs`. If the required final audit write fails, the engine returns a rejection. Otherwise it returns an accepted simulated approval or a structured rejection. No task is executed.
 
-The CLI provides `identity create`, `identity show`, and
-`identity export-public-key`. If native secure storage is unavailable, these
-operations return an error and do not write a plaintext fallback file.
+Authentication establishes that a request signature matches an enrolled public key. Authorization separately decides whether that trusted device may request the specified catalog task with those parameters. A signature by itself does not grant permission.
 
-## Phase 2: signed requests
+## SQLite data model
 
-`src/signature.rs` defines task requests and a deterministic, versioned binary
-format. It serializes the protocol marker and version, device and request IDs,
-timestamp, nonce, task ID, and sorted parameters. `sign_request` signs the
-exact serialized bytes with the sender's `DeviceIdentity`. Verification
-strictly parses those same bytes, checks the request device ID against the
-registered device ID supplied by the caller, and verifies the detached
-signature with the separately supplied registered public key.
+- `trusted_devices` stores a unique device ID and public key, name, enrollment timestamp, and `trusted` or `revoked` status.
+- `approved_tasks` contains the identifiers Shield recognizes from its compiled-in catalog.
+- `device_permissions` links devices to tasks using a composite primary key and foreign keys.
+- `used_nonces` uses `(device_id, request_id)` as its primary key and `(device_id, nonce)` as a unique constraint. It stores expiry for safe cleanup after the corresponding request is no longer valid.
+- `security_logs` stores timestamp, category, decision, optional IDs, and a fixed reason. It intentionally does not foreign-key device IDs so unknown claimed IDs can be audited.
 
-Request bytes and signature bytes are separate fields in `SignedRequest`.
-This phase adds no trusted-device registry, network communication, timestamp
-expiry check, or replay detection.
+SQLite foreign-key enforcement is enabled when the connection is initialized. Schema changes are versioned with `PRAGMA user_version` and transactional migrations. Values are passed through rusqlite parameters. State-changing operations that include audit rows use a transaction so an audit failure rolls back the corresponding change. See [database.md](database.md) for backup, migration, and retention details.
 
-## Phase 3: trusted device registry
+## Demo boundary
 
-`src/device_registry.rs` stores device IDs, validated Ed25519 public keys,
-names, registration times, and trusted/revoked status in SQLite. Enrollment
-requires an operator-provided SHA-256 fingerprint that matches the supplied
-public key. Unique database constraints prevent a device ID or public key
-from being registered twice.
+The interactive demo creates an in-memory database on each launch. Sample data is created only when `--setup-demo-data` is specified, and the UI labels it as test data. The local demo confirms its displayed fingerprint in the same interaction; that is a teaching simulation, not independent out-of-band verification. Demo data is not written into a normal registry database file.
 
-Authentication uses the untrusted request's device ID only to find a registry
-record. It rejects unknown and revoked devices, then verifies the Phase 2
-signature with the key read from SQLite. The request cannot supply its own
-trusted key. Enrollment is separate from authentication; both are separate
-from task authorization.
+## Concurrency and consistency
 
-## Phase 4: task authorization
+The replay reservation uses an immediate write transaction and database uniqueness constraints, so competing connections cannot both reserve the same device-scoped request ID or nonce. This is tested using independent SQLite connections.
 
-`src/authorization.rs` defines a small fixed catalog of task IDs and parameter
-schemas. A device receives no task permissions automatically. An operator
-explicitly grants a catalog task to a currently trusted device; grants are
-stored in the same SQLite registry and are checked on each authorization.
-Authorization accepts an `AuthenticatedRequest`, a value produced only after
-registry-backed signature verification, then rechecks current trust, grant,
-and exact parameter names and allowed values. It returns a structured allowed
-or denied result and never runs a command.
-
-## Phase 5: replay protection
-
-`src/replay_protection.rs` checks the timestamp of an authenticated request
-against a configurable maximum age and clock-skew allowance. It then stores
-the request ID and nonce in the registry's SQLite database in an immediate
-transaction. Both fields are unique within the authenticated device's scope.
-The existing Phase 2 signed format already binds the device ID, request ID,
-timestamp, nonce, task ID, and parameters. The request constructor obtains IDs
-and nonces from the operating-system random source. A nonce alone is not
-treated as proof of freshness; the verifier checks persistent state and time.
-
-Expired replay records are removed during a later check only after their
-request validity window ends. Clearing the database or restoring an old copy
-can erase replay history. The system clock must be reasonably accurate; a
-clock that moves backward or forward can cause valid requests to be denied or
-affect expiry decisions. This phase still has no network protocol or
-server-issued challenge.
-
-## Phase 6: persistent SQLite storage
-
-`src/database.rs` owns SQLite initialization, schema versioning, migrations,
-and privacy-conscious security log access. The registry, task permissions,
-and replay table use this shared database. Existing Phase 5 permission and
-replay rows are copied into the current table names by the first migration;
-legacy tables are left in place. Security-sensitive changes write their audit
-event in the same transaction when the operation changes persistent state.
-
-The audit log stores event category, accepted or rejected outcome, time,
-optional device/request/task identifiers, and a fixed reason. It never stores
-signatures, private keys, nonces, or request parameters. The log has no
-automatic retention policy and grows until an operator applies a retention
-policy or rotates the database.
-
-## Phase 7: integrated security engine
-
-`src/security_engine.rs` composes the existing identity, signature,
-authentication, replay, authorization, and SQLite audit interfaces into one
-ordered request pipeline. It authenticates a signed request once, checks and
-records replay state once, authorizes once, then records the final pipeline
-outcome. Accepted requests return a simulated approval result. No task or
-operating-system command is executed, and no network interface is added.
-
-The sender can use `SecurityEngine::create_signed_request` with a
-`DeviceIdentity`; it relies on the Phase 2 canonical request format and
-signature implementation. Existing lower-level APIs remain available.
-
-## Phase 8: interactive terminal demonstration
-
-`src/demo_shell.rs` provides a line-based menu over the actual
-`SecurityEngine`. It uses an in-memory SQLite registry so demo registrations,
-permissions, replay entries, and logs cannot modify an existing database file.
-Temporary sample identities and a limited task grant are created only when the
-operator uses `shield demo --setup-demo-data`, and are labeled as test data.
-The menu can also register an ephemeral identity after the operator confirms
-the displayed public-key fingerprint, then explicitly grant one predefined
-task. The interface contains no network path or task executor.
-
-## Intended objectives
-
-Future work may include networking and integration interfaces.
+The complete pipeline is not one transaction. Authentication, replay checking, authorization, and audit writes occur in sequence. Authorization rechecks current device status, but a revocation from another process can still race between that status check and the final response. The current interface does not promise linearizable revocation. A future network service would need explicit request/revocation ordering and transaction semantics.
 
 ## Scope boundary
 
-Authentication checks that a trusted, non-revoked record's public key signed
-the request. Authorization is a separate decision based on task allow-list,
-device grant, and parameter schema.
-Requests pass through authentication, replay checks, and authorization before
-the engine returns a simulated result. There is no network communication or
-system-command execution. The project is an academic demonstration, not a
-security certification.
+Implemented capabilities are local identity management, signatures, manual registration and revocation, task decisioning, replay state, auditing, the pipeline, and the demonstration menu. Network communication, device discovery, synchronization, remote challenges, actual task execution, hardware-backed keys, and tamper-evident audit storage are not implemented. This architecture is suitable for an academic demonstration and interface exploration; it is not a production security certification.
